@@ -1,0 +1,258 @@
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { Platform, PermissionsAndroid } from 'react-native';
+import { bleService, BLEDevice } from '../functionality/BLEService';
+
+// Always use real BLE service
+console.log('[BLE] Using REAL BLE Service');
+
+interface BLEContextType {
+  // State
+  isScanning: boolean;
+  isConnected: boolean;
+  discoveredDevices: BLEDevice[];
+  connectedDeviceName: string | null;
+  receivedMessages: string[];
+  statusMessage: string;
+  
+  // Actions
+  startScan: () => Promise<void>;
+  stopScan: () => void;
+  connectToDevice: (deviceId: string) => Promise<void>;
+  disconnectDevice: () => Promise<void>;
+  sendCommand: (command: string) => Promise<void>;
+  clearMessages: () => void;
+  requestPermissions: () => Promise<boolean>;
+}
+
+const BLEContext = createContext<BLEContextType | undefined>(undefined);
+
+export const useBLE = () => {
+  const context = useContext(BLEContext);
+  if (!context) {
+    throw new Error('useBLE must be used within BLEProvider');
+  }
+  return context;
+};
+
+interface BLEProviderProps {
+  children: ReactNode;
+}
+
+export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
+  const [isScanning, setIsScanning] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [discoveredDevices, setDiscoveredDevices] = useState<BLEDevice[]>([]);
+  const [connectedDeviceName, setConnectedDeviceName] = useState<string | null>(null);
+  const [receivedMessages, setReceivedMessages] = useState<string[]>([]);
+  const [statusMessage, setStatusMessage] = useState('Ready');
+
+  useEffect(() => {
+    // Initialize BLE service
+    const initBLE = async () => {
+      setStatusMessage('Initializing Bluetooth...');
+      const initialized = await bleService.initialize();
+      if (initialized) {
+        // Check current Bluetooth state
+        const state = await bleService.getBluetoothState();
+        if (state === 'PoweredOn') {
+          setStatusMessage('✓ Bluetooth ready');
+        } else if (state === 'PoweredOff') {
+          setStatusMessage('⚠️ Bluetooth is OFF. Please enable Bluetooth.');
+        } else {
+          setStatusMessage(`⚠️ Bluetooth state: ${state}`);
+        }
+      } else {
+        setStatusMessage('❌ Bluetooth not available');
+      }
+    };
+
+    initBLE();
+
+    // Setup callbacks
+    bleService.setDataCallback((data: string) => {
+      const timestamp = new Date().toLocaleTimeString();
+      const message = `[${timestamp}] RX: ${data}`;
+      setReceivedMessages((prev) => [...prev, message]);
+    });
+
+    bleService.setConnectionCallback((connected: boolean, device) => {
+      setIsConnected(connected);
+      if (connected && device) {
+        setConnectedDeviceName(device.name || 'Unknown Device');
+        setStatusMessage(`Connected to ${device.name || device.id}`);
+      } else {
+        setConnectedDeviceName(null);
+        setStatusMessage('Disconnected');
+      }
+    });
+
+    bleService.setErrorCallback((error: string) => {
+      setStatusMessage(`Error: ${error}`);
+      const timestamp = new Date().toLocaleTimeString();
+      setReceivedMessages((prev) => [...prev, `[${timestamp}] ERROR: ${error}`]);
+    });
+
+    // Cleanup on unmount
+    return () => {
+      bleService.destroy();
+    };
+  }, []);
+
+  const requestPermissions = async (): Promise<boolean> => {
+    if (Platform.OS === 'android') {
+      try {
+        if (Platform.Version >= 31) {
+          // Android 12+ requires BLUETOOTH_SCAN and BLUETOOTH_CONNECT
+          const granted = await PermissionsAndroid.requestMultiple([
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          ]);
+
+          return (
+            granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED &&
+            granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED &&
+            granted['android.permission.ACCESS_FINE_LOCATION'] === PermissionsAndroid.RESULTS.GRANTED
+          );
+        } else {
+          // Android 11 and below
+          const granted = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+          );
+          return granted === PermissionsAndroid.RESULTS.GRANTED;
+        }
+      } catch (error) {
+        console.error('Permission request error:', error);
+        return false;
+      }
+    }
+    return true; // iOS handles permissions automatically
+  };
+
+  const startScan = async () => {
+    // First check if Bluetooth is enabled
+    const state = await bleService.getBluetoothState();
+    console.log('[BLEContext] Bluetooth state:', state);
+    
+    if (state !== 'PoweredOn') {
+      let message = 'Bluetooth is not available';
+      if (state === 'PoweredOff') {
+        message = '⚠️ Bluetooth is OFF. Please turn on Bluetooth in your device settings.';
+      } else if (state === 'Unauthorized') {
+        message = '⚠️ Bluetooth permission denied. Please enable Bluetooth permissions.';
+      }
+      setStatusMessage(message);
+      return;
+    }
+
+    const hasPermissions = await requestPermissions();
+    if (!hasPermissions) {
+      setStatusMessage('⚠️ Bluetooth permissions denied. Please grant permissions in settings.');
+      return;
+    }
+
+    console.log('[BLEContext] Starting BLE scan...');
+    setIsScanning(true);
+    setDiscoveredDevices([]);
+    setStatusMessage('Scanning for devices...');
+
+    await bleService.startScan(
+      (device: BLEDevice) => {
+        console.log('[BLEContext] Device found:', device.name || device.id);
+        setDiscoveredDevices((prev) => {
+          // Avoid duplicates
+          if (prev.some((d) => d.id === device.id)) {
+            return prev;
+          }
+          // Sort: preferred device first, then by name
+          const newDevices = [...prev, device];
+          return newDevices.sort((a, b) => {
+            if (a.name === 'DeepSleepDongle') return -1;
+            if (b.name === 'DeepSleepDongle') return 1;
+            return (a.name || '').localeCompare(b.name || '');
+          });
+        });
+      },
+      10 // scan for 10 seconds
+    );
+
+    // Update scanning status after scan completes
+    setTimeout(() => {
+      setIsScanning(false);
+      setStatusMessage((prevMsg) => {
+        // Only update if we're still showing scanning message
+        if (prevMsg.includes('Scanning')) {
+          return `Scan complete`;
+        }
+        return prevMsg;
+      });
+    }, 10500); // Slightly longer than scan duration to ensure callback finishes
+  };
+
+  const stopScan = () => {
+    console.log('[BLEContext] Stopping scan');
+    bleService.stopScan();
+    setIsScanning(false);
+    setStatusMessage('Scan stopped');
+  };
+
+  const connectToDevice = async (deviceId: string) => {
+    console.log('[BLEContext] Attempting to connect to device:', deviceId);
+    setStatusMessage('Connecting...');
+    const success = await bleService.connect(deviceId);
+    if (!success) {
+      setStatusMessage('Connection failed');
+    }
+  };
+
+  const disconnectDevice = async () => {
+    await bleService.disconnect();
+    setIsConnected(false);
+    setConnectedDeviceName(null);
+    setStatusMessage('Disconnected');
+  };
+
+  const sendCommand = async (command: string) => {
+    if (!isConnected) {
+      setStatusMessage('Not connected to any device');
+      return;
+    }
+
+    // Send command as-is without adding newline (device firmware should handle it)
+    // Python GUI defaults to "None" for line ending
+    const dataToSend = command;
+    
+    console.log('[BLEContext] Sending command:', JSON.stringify(dataToSend));
+    const success = await bleService.sendData(dataToSend, true); // true = with response (Python default)
+    
+    if (success) {
+      const timestamp = new Date().toLocaleTimeString();
+      const message = `[${timestamp}] TX: ${command}`;
+      setReceivedMessages((prev) => [...prev, message]);
+    } else {
+      setStatusMessage('Failed to send command');
+    }
+  };
+
+  const clearMessages = () => {
+    setReceivedMessages([]);
+  };
+
+  const value: BLEContextType = {
+    isScanning,
+    isConnected,
+    discoveredDevices,
+    connectedDeviceName,
+    receivedMessages,
+    statusMessage,
+    startScan,
+    stopScan,
+    connectToDevice,
+    disconnectDevice,
+    sendCommand,
+    clearMessages,
+    requestPermissions,
+  };
+
+  return <BLEContext.Provider value={value}>{children}</BLEContext.Provider>;
+};
