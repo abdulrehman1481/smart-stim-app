@@ -1,6 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { Platform, PermissionsAndroid } from 'react-native';
 import { bleService, BLEDevice } from '../functionality/BLEService';
+import { 
+  BLEProtocol, 
+  BLEProtocolType, 
+  SUPPORTED_PROTOCOLS,
+  NORDIC_UART_PROTOCOL,
+  ESP32_PROTOCOL 
+} from './BLEProtocols';
 
 // Always use real BLE service
 console.log('[BLE] Using REAL BLE Service');
@@ -13,6 +20,9 @@ interface BLEContextType {
   connectedDeviceName: string | null;
   receivedMessages: string[];
   statusMessage: string;
+  currentProtocol: BLEProtocol;
+  availableProtocols: BLEProtocol[];
+  selectedProtocols: BLEProtocol[];
   
   // Actions
   startScan: () => Promise<void>;
@@ -22,6 +32,8 @@ interface BLEContextType {
   sendCommand: (command: string) => Promise<void>;
   clearMessages: () => void;
   requestPermissions: () => Promise<boolean>;
+  setProtocolFilter: (protocols: BLEProtocol[]) => void;
+  toggleProtocol: (protocol: BLEProtocol) => void;
 }
 
 const BLEContext = createContext<BLEContextType | undefined>(undefined);
@@ -45,6 +57,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   const [connectedDeviceName, setConnectedDeviceName] = useState<string | null>(null);
   const [receivedMessages, setReceivedMessages] = useState<string[]>([]);
   const [statusMessage, setStatusMessage] = useState('Ready');
+  const [currentProtocol, setCurrentProtocol] = useState<BLEProtocol>(NORDIC_UART_PROTOCOL);
+  const [selectedProtocols, setSelectedProtocols] = useState<BLEProtocol[]>(SUPPORTED_PROTOCOLS);
 
   useEffect(() => {
     // Initialize BLE service
@@ -79,7 +93,9 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
       setIsConnected(connected);
       if (connected && device) {
         setConnectedDeviceName(device.name || 'Unknown Device');
-        setStatusMessage(`Connected to ${device.name || device.id}`);
+        const protocol = bleService.getCurrentProtocol();
+        setCurrentProtocol(protocol);
+        setStatusMessage(`Connected to ${device.name || device.id} (${protocol.name})`);
       } else {
         setConnectedDeviceName(null);
         setStatusMessage('Disconnected');
@@ -238,6 +254,35 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     setReceivedMessages([]);
   };
 
+  const setProtocolFilter = (protocols: BLEProtocol[]) => {
+    setSelectedProtocols(protocols);
+    bleService.setProtocolFilter(protocols);
+    console.log('[BLEContext] Protocol filter updated:', protocols.map(p => p.name).join(', '));
+  };
+
+  const toggleProtocol = (protocol: BLEProtocol) => {
+    setSelectedProtocols(prev => {
+      const isSelected = prev.some(p => p.type === protocol.type);
+      let newSelection: BLEProtocol[];
+      
+      if (isSelected) {
+        // Remove protocol (but ensure at least one remains)
+        newSelection = prev.filter(p => p.type !== protocol.type);
+        if (newSelection.length === 0) {
+          console.warn('[BLEContext] Cannot remove last protocol');
+          return prev;
+        }
+      } else {
+        // Add protocol
+        newSelection = [...prev, protocol];
+      }
+      
+      bleService.setProtocolFilter(newSelection);
+      console.log('[BLEContext] Protocols toggled. Active:', newSelection.map(p => p.name).join(', '));
+      return newSelection;
+    });
+  };
+
   const value: BLEContextType = {
     isScanning,
     isConnected,
@@ -245,6 +290,9 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     connectedDeviceName,
     receivedMessages,
     statusMessage,
+    currentProtocol,
+    availableProtocols: SUPPORTED_PROTOCOLS,
+    selectedProtocols,
     startScan,
     stopScan,
     connectToDevice,
@@ -252,6 +300,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     sendCommand,
     clearMessages,
     requestPermissions,
+    setProtocolFilter,
+    toggleProtocol,
   };
 
   return <BLEContext.Provider value={value}>{children}</BLEContext.Provider>;

@@ -2,18 +2,26 @@ import { BleManager, Device, Characteristic, State } from 'react-native-ble-plx'
 import { Platform } from 'react-native';
 import * as ExpoDevice from 'expo-device';
 import base64 from 'react-native-base64';
+import { 
+  BLEProtocol, 
+  BLEProtocolType, 
+  NORDIC_UART_PROTOCOL, 
+  ESP32_PROTOCOL,
+  SUPPORTED_PROTOCOLS,
+  getProtocolByServiceUUID 
+} from './BLEProtocols';
 
-// Nordic UART Service UUIDs (same as your Python GUI)
-export const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-export const NUS_RX_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // Write to device
-export const NUS_TX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // Receive from device (notify)
-
-export const PREFERRED_DEVICE_NAME = 'DeepSleepDongle';
+// For backward compatibility
+export const NUS_SERVICE_UUID = NORDIC_UART_PROTOCOL.serviceUUID;
+export const NUS_RX_CHAR_UUID = NORDIC_UART_PROTOCOL.rxCharUUID;
+export const NUS_TX_CHAR_UUID = NORDIC_UART_PROTOCOL.txCharUUID;
+export const PREFERRED_DEVICE_NAME = NORDIC_UART_PROTOCOL.preferredDeviceName;
 
 export interface BLEDevice {
   id: string;
   name: string | null;
   rssi: number | null;
+  protocol?: BLEProtocol; // Which protocol this device supports
 }
 
 export type BLEConnectionCallback = (isConnected: boolean, device?: Device) => void;
@@ -27,6 +35,8 @@ class BLEService {
   private dataCallback: BLEDataCallback | null = null;
   private errorCallback: BLEErrorCallback | null = null;
   private connectionCallback: BLEConnectionCallback | null = null;
+  private currentProtocol: BLEProtocol = NORDIC_UART_PROTOCOL; // Default to Nordic UART
+  private selectedProtocols: BLEProtocol[] = SUPPORTED_PROTOCOLS; // Scan for all by default
 
   constructor() {
     this.manager = new BleManager();
@@ -67,6 +77,23 @@ class BLEService {
   // Check Bluetooth state
   async getBluetoothState(): Promise<State> {
     return await this.manager.state();
+  }
+
+  // Set which protocols to scan for
+  setProtocolFilter(protocols: BLEProtocol[]): void {
+    this.selectedProtocols = protocols.length > 0 ? protocols : SUPPORTED_PROTOCOLS;
+    console.log('[BLE] Protocol filter set:', this.selectedProtocols.map(p => p.name).join(', '));
+  }
+
+  // Get current protocol
+  getCurrentProtocol(): BLEProtocol {
+    return this.currentProtocol;
+  }
+
+  // Set protocol (useful when connecting to a specific device)
+  setProtocol(protocol: BLEProtocol): void {
+    this.currentProtocol = protocol;
+    console.log('[BLE] Protocol changed to:', protocol.name);
   }
 
   // Scan for BLE devices
@@ -110,12 +137,16 @@ class BLEService {
       }
 
       console.log('[BLE] Starting device scan for', durationSeconds, 'seconds');
-      console.log('[BLE] Looking for devices with Nordic UART Service (NUS)...');
+      console.log('[BLE] Looking for devices with protocols:', this.selectedProtocols.map(p => p.name).join(', '));
       this.isScanning = true;
       const discoveredDevices = new Map<string, BLEDevice>();
 
+      // Get all service UUIDs to scan for
+      const serviceUUIDs = this.selectedProtocols.map(p => p.serviceUUID);
+      console.log('[BLE] Scanning for service UUIDs:', serviceUUIDs);
+
       this.manager.startDeviceScan(
-        [NUS_SERVICE_UUID], // Scan specifically for Nordic UART Service - filters out most random devices
+        serviceUUIDs, // Scan for all selected protocol services
         { 
           allowDuplicates: false, // Don't report same device multiple times
           scanMode: Platform.OS === 'android' ? 2 : undefined, // Use balanced scan mode on Android
@@ -143,12 +174,22 @@ class BLEService {
               return;
             }
 
-            // Log discovered device with NUS
-            console.log('[BLE] ✓ Found NUS device:', {
+            // Try to determine which protocol this device uses
+            // We'll verify this during connection, but we can make an educated guess
+            let detectedProtocol: BLEProtocol | undefined;
+            for (const protocol of this.selectedProtocols) {
+              if (protocol.preferredDeviceName && deviceName.includes(protocol.preferredDeviceName)) {
+                detectedProtocol = protocol;
+                break;
+              }
+            }
+
+            // Log discovered device
+            console.log('[BLE] ✓ Found BLE device:', {
               id: device.id,
               name: deviceName,
               rssi: device.rssi,
-              isPreferred: deviceName === PREFERRED_DEVICE_NAME,
+              detectedProtocol: detectedProtocol?.name || 'Unknown',
             });
 
             // Add to discovered devices map (prevents duplicates)
@@ -157,13 +198,14 @@ class BLEService {
                 id: device.id,
                 name: deviceName,
                 rssi: device.rssi,
+                protocol: detectedProtocol,
               };
               discoveredDevices.set(device.id, bleDevice);
               onDeviceFound(bleDevice);
               
-              // Highlight if this is our preferred device
-              if (deviceName === PREFERRED_DEVICE_NAME) {
-                console.log(`[BLE] 🎯 Found preferred device: ${PREFERRED_DEVICE_NAME}`);
+              // Highlight if this is a preferred device
+              if (detectedProtocol) {
+                console.log(`[BLE] 🎯 Found preferred device: ${deviceName} (${detectedProtocol.name})`);
               }
             }
           }
@@ -173,7 +215,7 @@ class BLEService {
       // Auto-stop scan after duration
       setTimeout(() => {
         const deviceCount = discoveredDevices.size;
-        console.log(`[BLE] Scan completed. Found ${deviceCount} device(s) with Nordic UART Service.`);
+        console.log(`[BLE] Scan completed. Found ${deviceCount} device(s).`);
         this.stopScan();
       }, durationSeconds * 1000);
     } catch (error) {
@@ -211,21 +253,33 @@ class BLEService {
       // Discover services and characteristics
       await device.discoverAllServicesAndCharacteristics();
 
-      console.log('[BLE] Services discovered, checking for NUS service...');
-      // Verify that the device has the Nordic UART Service
+      console.log('[BLE] Services discovered, checking for supported services...');
+      // Verify that the device has a supported service and auto-detect protocol
       const services = await device.services();
-      const hasNUS = services.some(service => service.uuid.toLowerCase() === NUS_SERVICE_UUID.toLowerCase());
+      let detectedProtocol: BLEProtocol | null = null;
       
-      if (!hasNUS) {
-        console.warn('[BLE] Device does not have Nordic UART Service');
-        // Continue anyway - device might still work
+      for (const service of services) {
+        const protocol = getProtocolByServiceUUID(service.uuid);
+        if (protocol) {
+          detectedProtocol = protocol;
+          console.log('[BLE] ✓ Detected protocol:', protocol.name);
+          break;
+        }
+      }
+      
+      if (!detectedProtocol) {
+        console.warn('[BLE] Device does not have any recognized service protocol');
+        // Try to use the current protocol anyway
+        detectedProtocol = this.currentProtocol;
       } else {
-        console.log('[BLE] ✓ Nordic UART Service found');
+        // Update current protocol to the detected one
+        this.currentProtocol = detectedProtocol;
       }
 
+      console.log('[BLE] Using protocol:', this.currentProtocol.name);
       this.connectedDevice = device;
 
-      // Setup notifications for incoming data (NUS TX characteristic)
+      // Setup notifications for incoming data
       console.log('[BLE] Setting up notifications...');
       await this.setupNotifications();
 
@@ -262,12 +316,13 @@ class BLEService {
     }
 
     try {
-      console.log('[BLE] Setting up notifications for NUS TX characteristic');
+      const protocol = this.currentProtocol;
+      console.log('[BLE] Setting up notifications for', protocol.name, 'TX characteristic');
       
-      // Monitor NUS TX characteristic (device sends data to app)
+      // Monitor TX characteristic (device sends data to app)
       this.connectedDevice.monitorCharacteristicForService(
-        NUS_SERVICE_UUID,
-        NUS_TX_CHAR_UUID,
+        protocol.serviceUUID,
+        protocol.txCharUUID,
         (error, characteristic) => {
           if (error) {
             // Some errors are expected during normal operation (like when device disconnects)
@@ -307,24 +362,25 @@ class BLEService {
     }
 
     try {
-      console.log('[BLE] Sending data to device:', JSON.stringify(data), `(${data.length} bytes, withResponse: ${withResponse})`);
+      const protocol = this.currentProtocol;
+      console.log('[BLE] Sending data to device:', JSON.stringify(data), `(${data.length} bytes, withResponse: ${withResponse}, protocol: ${protocol.name})`);
       
       // Encode data to base64
       const encodedData = base64.encode(data);
       console.log('[BLE] Base64 encoded:', encodedData);
 
-      // Write to NUS RX characteristic (app sends data to device)
+      // Write to RX characteristic (app sends data to device)
       // Use write-with-response by default (like Python GUI default)
       if (withResponse) {
         await this.connectedDevice.writeCharacteristicWithResponseForService(
-          NUS_SERVICE_UUID,
-          NUS_RX_CHAR_UUID,
+          protocol.serviceUUID,
+          protocol.rxCharUUID,
           encodedData
         );
       } else {
         await this.connectedDevice.writeCharacteristicWithoutResponseForService(
-          NUS_SERVICE_UUID,
-          NUS_RX_CHAR_UUID,
+          protocol.serviceUUID,
+          protocol.rxCharUUID,
           encodedData
         );
       }
