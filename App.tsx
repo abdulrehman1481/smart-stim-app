@@ -3,9 +3,10 @@ import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, StatusBar } fro
 import { BLEProvider } from './src/functionality/BLEContext';
 import { DeviceScanner } from './src/components/DeviceScanner';
 import { ControlConsole } from './src/components/ControlConsole';
+import { SmartStimPanel } from './src/components/SmartStimPanel';
 
 function AppContent() {
-  const [activeTab, setActiveTab] = useState<'scanner' | 'console'>('scanner');
+  const [activeTab, setActiveTab] = useState<'scanner' | 'console' | 'smartstim'>('scanner');
 
   return (
     <SafeAreaView style={styles.container}>
@@ -28,6 +29,14 @@ function AppContent() {
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
+          style={[styles.tab, activeTab === 'smartstim' && styles.tabActive]}
+          onPress={() => setActiveTab('smartstim')}
+        >
+          <Text style={[styles.tabText, activeTab === 'smartstim' && styles.tabTextActive]}>
+            ⚡ Stim
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
           style={[styles.tab, activeTab === 'console' && styles.tabActive]}
           onPress={() => setActiveTab('console')}
         >
@@ -39,7 +48,13 @@ function AppContent() {
 
       {/* Content */}
       <View style={styles.content}>
-        {activeTab === 'scanner' ? <DeviceScanner /> : <ControlConsole />}
+        {activeTab === 'scanner' ? (
+          <DeviceScanner />
+        ) : activeTab === 'smartstim' ? (
+          <SmartStimPanel />
+        ) : (
+          <ControlConsole />
+        )}
       </View>
     </SafeAreaView>
   );

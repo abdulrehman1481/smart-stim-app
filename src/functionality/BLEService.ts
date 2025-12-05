@@ -141,12 +141,12 @@ class BLEService {
       this.isScanning = true;
       const discoveredDevices = new Map<string, BLEDevice>();
 
-      // Get all service UUIDs to scan for
-      const serviceUUIDs = this.selectedProtocols.map(p => p.serviceUUID);
-      console.log('[BLE] Scanning for service UUIDs:', serviceUUIDs);
+      // Scan for ALL BLE devices (null = no service filter)
+      // We'll detect protocols when connecting, not during scan
+      console.log('[BLE] Scanning for ALL BLE devices...');
 
       this.manager.startDeviceScan(
-        serviceUUIDs, // Scan for all selected protocol services
+        null, // Scan for ALL devices (no service filter)
         { 
           allowDuplicates: false, // Don't report same device multiple times
           scanMode: Platform.OS === 'android' ? 2 : undefined, // Use balanced scan mode on Android
@@ -163,22 +163,14 @@ class BLEService {
             // Get device name, preferring 'name' over 'localName'
             const deviceName = device.name || device.localName || 'Unknown Device';
             
-            // Only process devices with reasonable RSSI (signal strength)
-            // RSSI < -100 means very weak signal, likely not useful
-            if (device.rssi && device.rssi < -100) {
-              console.log('[BLE] Ignoring device with weak signal:', {
-                id: device.id,
-                name: deviceName,
-                rssi: device.rssi,
-              });
-              return;
-            }
+            // Show ALL devices regardless of signal strength
+            // Let user decide which to connect to
 
-            // Try to determine which protocol this device uses
-            // We'll verify this during connection, but we can make an educated guess
+            // Try to determine which protocol this device uses based on name
+            // We'll verify this during connection by checking service UUIDs
             let detectedProtocol: BLEProtocol | undefined;
             for (const protocol of this.selectedProtocols) {
-              if (protocol.preferredDeviceName && deviceName.includes(protocol.preferredDeviceName)) {
+              if (protocol.preferredDeviceName && deviceName.toLowerCase().includes(protocol.preferredDeviceName.toLowerCase())) {
                 detectedProtocol = protocol;
                 break;
               }
@@ -235,78 +227,91 @@ class BLEService {
   }
 
   // Connect to a device
-  async connect(deviceId: string): Promise<boolean> {
-    try {
-      console.log('[BLE] Attempting to connect to device:', deviceId);
-      
-      // Disconnect from any existing device
-      await this.disconnect();
+  async connect(deviceId: string, retries: number = 3): Promise<boolean> {
+    let lastError: any = null;
+    
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        console.log(`[BLE] Connection attempt ${attempt}/${retries} for device:`, deviceId);
+        
+        // Disconnect from any existing device
+        await this.disconnect();
 
-      console.log('[BLE] Connecting to device...');
-      // Connect to device with timeout
-      const device = await this.manager.connectToDevice(deviceId, {
-        requestMTU: 512, // Request larger MTU for better throughput
-        timeout: 10000, // 10 second timeout
-      });
+        console.log('[BLE] Connecting to device...');
+        // Connect to device with timeout
+        const device = await this.manager.connectToDevice(deviceId, {
+          requestMTU: 512, // Request larger MTU for better throughput
+          timeout: 10000, // 10 second timeout
+        });
 
-      console.log('[BLE] Device connected, discovering services...');
-      // Discover services and characteristics
-      await device.discoverAllServicesAndCharacteristics();
+        console.log('[BLE] Device connected, discovering services...');
+        // Discover services and characteristics
+        await device.discoverAllServicesAndCharacteristics();
 
-      console.log('[BLE] Services discovered, checking for supported services...');
-      // Verify that the device has a supported service and auto-detect protocol
-      const services = await device.services();
-      let detectedProtocol: BLEProtocol | null = null;
-      
-      for (const service of services) {
-        const protocol = getProtocolByServiceUUID(service.uuid);
-        if (protocol) {
-          detectedProtocol = protocol;
-          console.log('[BLE] ✓ Detected protocol:', protocol.name);
-          break;
+        console.log('[BLE] Services discovered, checking for supported services...');
+        // Verify that the device has a supported service and auto-detect protocol
+        const services = await device.services();
+        let detectedProtocol: BLEProtocol | null = null;
+        
+        for (const service of services) {
+          const protocol = getProtocolByServiceUUID(service.uuid);
+          if (protocol) {
+            detectedProtocol = protocol;
+            console.log('[BLE] ✓ Detected protocol:', protocol.name);
+            break;
+          }
         }
-      }
-      
-      if (!detectedProtocol) {
-        console.warn('[BLE] Device does not have any recognized service protocol');
-        // Try to use the current protocol anyway
-        detectedProtocol = this.currentProtocol;
-      } else {
-        // Update current protocol to the detected one
-        this.currentProtocol = detectedProtocol;
-      }
+        
+        if (!detectedProtocol) {
+          console.warn('[BLE] Device does not have any recognized service protocol');
+          // Try to use the current protocol anyway
+          detectedProtocol = this.currentProtocol;
+        } else {
+          // Update current protocol to the detected one
+          this.currentProtocol = detectedProtocol;
+        }
 
-      console.log('[BLE] Using protocol:', this.currentProtocol.name);
-      this.connectedDevice = device;
+        console.log('[BLE] Using protocol:', this.currentProtocol.name);
+        this.connectedDevice = device;
 
-      // Setup notifications for incoming data
-      console.log('[BLE] Setting up notifications...');
-      await this.setupNotifications();
+        // Setup notifications for incoming data
+        console.log('[BLE] Setting up notifications...');
+        await this.setupNotifications();
 
-      // Monitor disconnection
-      device.onDisconnected((error, disconnectedDevice) => {
-        console.log('[BLE] Device disconnected:', disconnectedDevice?.name || disconnectedDevice?.id);
-        this.connectedDevice = null;
+        // Monitor disconnection
+        device.onDisconnected((error, disconnectedDevice) => {
+          console.log('[BLE] Device disconnected:', disconnectedDevice?.name || disconnectedDevice?.id);
+          this.connectedDevice = null;
+          if (this.connectionCallback) {
+            this.connectionCallback(false);
+          }
+          if (error) {
+            this.handleError(`Disconnected with error: ${error.message}`);
+          }
+        });
+
+        console.log('[BLE] ✓ Successfully connected to', device.name || device.id);
         if (this.connectionCallback) {
-          this.connectionCallback(false);
+          this.connectionCallback(true, device);
         }
-        if (error) {
-          this.handleError(`Disconnected with error: ${error.message}`);
-        }
-      });
 
-      console.log('[BLE] ✓ Successfully connected to', device.name || device.id);
-      if (this.connectionCallback) {
-        this.connectionCallback(true, device);
+        return true;
+      } catch (error: any) {
+        lastError = error;
+        console.error(`[BLE] Connection attempt ${attempt} failed:`, error.message);
+        
+        if (attempt < retries) {
+          console.log(`[BLE] Retrying in 2 seconds... (${retries - attempt} attempts remaining)`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
       }
-
-      return true;
-    } catch (error: any) {
-      console.error('[BLE] Connection failed:', error);
-      this.handleError(`Connection failed: ${error?.message || error}`);
-      this.connectedDevice = null;
-      return false;
     }
+    
+    // All retries failed
+    console.error('[BLE] All connection attempts failed');
+    this.handleError(`Connection failed after ${retries} attempts: ${lastError?.message || lastError}`);
+    this.connectedDevice = null;
+    return false;
   }
 
   // Setup notifications for receiving data from device
@@ -336,7 +341,10 @@ class BLEService {
           if (characteristic?.value) {
             try {
               const decodedData = this.decodeBase64(characteristic.value);
-              console.log('[BLE] Received data from device:', decodedData);
+              // Only log if data is significant (avoid spam from continuous streaming)
+              if (decodedData.length < 100 || decodedData.includes('ERROR') || decodedData.includes('OK')) {
+                console.log('[BLE] RX:', decodedData.substring(0, 50) + (decodedData.length > 50 ? '...' : ''));
+              }
               if (this.dataCallback) {
                 this.dataCallback(decodedData);
               }
@@ -363,11 +371,10 @@ class BLEService {
 
     try {
       const protocol = this.currentProtocol;
-      console.log('[BLE] Sending data to device:', JSON.stringify(data), `(${data.length} bytes, withResponse: ${withResponse}, protocol: ${protocol.name})`);
+      console.log('[BLE] TX:', data.substring(0, 50) + (data.length > 50 ? '...' : ''), `(${data.length} bytes)`);
       
       // Encode data to base64
       const encodedData = base64.encode(data);
-      console.log('[BLE] Base64 encoded:', encodedData);
 
       // Write to RX characteristic (app sends data to device)
       // Use write-with-response by default (like Python GUI default)

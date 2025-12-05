@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { Platform, PermissionsAndroid } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { bleService, BLEDevice } from '../functionality/BLEService';
 import { 
   BLEProtocol, 
@@ -11,6 +12,8 @@ import {
 
 // Always use real BLE service
 console.log('[BLE] Using REAL BLE Service');
+
+const LAST_DEVICE_KEY = 'ble_last_connected_device';
 
 interface BLEContextType {
   // State
@@ -59,7 +62,9 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [currentProtocol, setCurrentProtocol] = useState<BLEProtocol>(NORDIC_UART_PROTOCOL);
   const [selectedProtocols, setSelectedProtocols] = useState<BLEProtocol[]>(SUPPORTED_PROTOCOLS);
+  const [autoConnectAttempted, setAutoConnectAttempted] = useState(false);
 
+  // Auto-connect on startup
   useEffect(() => {
     // Initialize BLE service
     const initBLE = async () => {
@@ -70,6 +75,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
         const state = await bleService.getBluetoothState();
         if (state === 'PoweredOn') {
           setStatusMessage('✓ Bluetooth ready');
+          // Auto-connect removed - user must manually scan
         } else if (state === 'PoweredOff') {
           setStatusMessage('⚠️ Bluetooth is OFF. Please enable Bluetooth.');
         } else {
@@ -96,6 +102,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
         const protocol = bleService.getCurrentProtocol();
         setCurrentProtocol(protocol);
         setStatusMessage(`Connected to ${device.name || device.id} (${protocol.name})`);
+        // Save last connected device
+        saveLastDevice(device.id, device.name || 'Unknown Device');
       } else {
         setConnectedDeviceName(null);
         setStatusMessage('Disconnected');
@@ -143,6 +151,67 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
       }
     }
     return true; // iOS handles permissions automatically
+  };
+
+  const saveLastDevice = async (deviceId: string, deviceName: string) => {
+    try {
+      await AsyncStorage.setItem(LAST_DEVICE_KEY, JSON.stringify({ deviceId, deviceName }));
+      console.log('[BLEContext] Saved last device:', deviceName);
+    } catch (error) {
+      console.error('Failed to save last device:', error);
+    }
+  };
+
+  const getLastDevice = async (): Promise<{ deviceId: string; deviceName: string } | null> => {
+    try {
+      const saved = await AsyncStorage.getItem(LAST_DEVICE_KEY);
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (error) {
+      console.error('Failed to load last device:', error);
+    }
+    return null;
+  };
+
+  const attemptAutoConnect = async () => {
+    if (autoConnectAttempted) return;
+    setAutoConnectAttempted(true);
+
+    const lastDevice = await getLastDevice();
+    if (!lastDevice) {
+      console.log('[BLEContext] No last device found for auto-connect');
+      return;
+    }
+
+    console.log('[BLEContext] Attempting auto-connect to:', lastDevice.deviceName);
+    setStatusMessage(`Auto-connecting to ${lastDevice.deviceName}...`);
+
+    // Start a quick scan to find the device
+    setIsScanning(true);
+    let foundDevice: BLEDevice | null = null;
+
+    await bleService.startScan(
+      (device: BLEDevice) => {
+        if (device.id === lastDevice.deviceId) {
+          foundDevice = device;
+          console.log('[BLEContext] Found last device:', device.name);
+          bleService.stopScan();
+        }
+      },
+      5 // Quick 5-second scan
+    );
+
+    setTimeout(async () => {
+      setIsScanning(false);
+      if (foundDevice) {
+        console.log('[BLEContext] Connecting to last device...');
+        await connectToDevice(foundDevice.id);
+      } else {
+        console.log('[BLEContext] Last device not found during auto-connect scan');
+        setStatusMessage('Last device not found. Please scan manually.');
+      }
+    }, 5500);
   };
 
   const startScan = async () => {
