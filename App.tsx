@@ -4,13 +4,14 @@ import { BLEProvider } from './src/functionality/BLEContext';
 import { DeviceScanner } from './src/components/DeviceScanner';
 import { ControlConsole } from './src/components/ControlConsole';
 import { SmartStimPanel } from './src/components/SmartStimPanel';
+import { WaveformPlot } from './src/components/WaveformPlot';
 
 function AppContent() {
-  const [activeTab, setActiveTab] = useState<'scanner' | 'console' | 'smartstim'>('scanner');
+  const [activeTab, setActiveTab] = useState<'scanner' | 'console' | 'smartstim' | 'waveform'>('scanner');
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#1e3a8a" />
+      <StatusBar barStyle="light-content" backgroundColor="#6366f1" />
       
       {/* App Header */}
       <View style={styles.appHeader}>
@@ -37,6 +38,14 @@ function AppContent() {
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
+          style={[styles.tab, activeTab === 'waveform' && styles.tabActive]}
+          onPress={() => setActiveTab('waveform')}
+        >
+          <Text style={[styles.tabText, activeTab === 'waveform' && styles.tabTextActive]}>
+            📊 Wave
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
           style={[styles.tab, activeTab === 'console' && styles.tabActive]}
           onPress={() => setActiveTab('console')}
         >
@@ -52,6 +61,8 @@ function AppContent() {
           <DeviceScanner />
         ) : activeTab === 'smartstim' ? (
           <SmartStimPanel />
+        ) : activeTab === 'waveform' ? (
+          <WaveformPlot />
         ) : (
           <ControlConsole />
         )}
@@ -71,49 +82,56 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1e3a8a',
+    backgroundColor: '#6366f1',
   },
   appHeader: {
-    backgroundColor: '#1e3a8a',
+    backgroundColor: '#6366f1',
     paddingHorizontal: 20,
-    paddingTop: 10,
+    paddingTop: 12,
     paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
   },
   appTitle: {
     color: '#ffffff',
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: 0.5,
   },
   appSubtitle: {
-    color: '#93c5fd',
-    fontSize: 14,
+    color: '#e0e7ff',
+    fontSize: 13,
     marginTop: 4,
+    fontWeight: '500',
   },
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: '#1e3a8a',
-    paddingHorizontal: 12,
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 8,
+    paddingTop: 4,
   },
   tab: {
     flex: 1,
-    paddingVertical: 12,
+    paddingVertical: 14,
     alignItems: 'center',
     borderBottomWidth: 3,
     borderBottomColor: 'transparent',
+    marginHorizontal: 4,
   },
   tabActive: {
-    borderBottomColor: '#3b82f6',
+    borderBottomColor: '#ffffff',
   },
   tabText: {
-    color: '#93c5fd',
-    fontSize: 16,
+    color: '#c7d2fe',
+    fontSize: 14,
     fontWeight: '600',
   },
   tabTextActive: {
     color: '#ffffff',
+    fontWeight: '700',
   },
   content: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#f8fafc',
   },
 });
