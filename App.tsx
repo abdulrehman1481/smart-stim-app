@@ -2,12 +2,11 @@ import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, StatusBar } from 'react-native';
 import { BLEProvider } from './src/functionality/BLEContext';
 import { DeviceScanner } from './src/components/DeviceScanner';
-import { ControlConsole } from './src/components/ControlConsole';
-import { SmartStimPanel } from './src/components/SmartStimPanel';
-import { WaveformPlot } from './src/components/WaveformPlot';
+import { ComprehensiveStimPanel } from './src/components/ComprehensiveStimPanel';
+import { WristbandSensorsPanel } from './src/components/WristbandSensorsPanel';
 
 function AppContent() {
-  const [activeTab, setActiveTab] = useState<'scanner' | 'console' | 'smartstim' | 'waveform'>('scanner');
+  const [activeTab, setActiveTab] = useState<'devices' | 'stim' | 'sensors'>('devices');
 
   return (
     <SafeAreaView style={styles.container}>
@@ -22,49 +21,39 @@ function AppContent() {
       {/* Tab Navigation */}
       <View style={styles.tabBar}>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'scanner' && styles.tabActive]}
-          onPress={() => setActiveTab('scanner')}
+          style={[styles.tab, activeTab === 'devices' && styles.tabActive]}
+          onPress={() => setActiveTab('devices')}
         >
-          <Text style={[styles.tabText, activeTab === 'scanner' && styles.tabTextActive]}>
+          <Text style={[styles.tabText, activeTab === 'devices' && styles.tabTextActive]}>
             📡 Devices
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'smartstim' && styles.tabActive]}
-          onPress={() => setActiveTab('smartstim')}
+          style={[styles.tab, activeTab === 'stim' && styles.tabActive]}
+          onPress={() => setActiveTab('stim')}
         >
-          <Text style={[styles.tabText, activeTab === 'smartstim' && styles.tabTextActive]}>
+          <Text style={[styles.tabText, activeTab === 'stim' && styles.tabTextActive]}>
             ⚡ Stim
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'waveform' && styles.tabActive]}
-          onPress={() => setActiveTab('waveform')}
+          style={[styles.tab, activeTab === 'sensors' && styles.tabActive]}
+          onPress={() => setActiveTab('sensors')}
         >
-          <Text style={[styles.tabText, activeTab === 'waveform' && styles.tabTextActive]}>
-            📊 Wave
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'console' && styles.tabActive]}
-          onPress={() => setActiveTab('console')}
-        >
-          <Text style={[styles.tabText, activeTab === 'console' && styles.tabTextActive]}>
-            🎮 Console
+          <Text style={[styles.tabText, activeTab === 'sensors' && styles.tabTextActive]}>
+            🌊 Sensors
           </Text>
         </TouchableOpacity>
       </View>
 
       {/* Content */}
       <View style={styles.content}>
-        {activeTab === 'scanner' ? (
+        {activeTab === 'devices' ? (
           <DeviceScanner />
-        ) : activeTab === 'smartstim' ? (
-          <SmartStimPanel />
-        ) : activeTab === 'waveform' ? (
-          <WaveformPlot />
+        ) : activeTab === 'stim' ? (
+          <ComprehensiveStimPanel />
         ) : (
-          <ControlConsole />
+          <WristbandSensorsPanel />
         )}
       </View>
     </SafeAreaView>
