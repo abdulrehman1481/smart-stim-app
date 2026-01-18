@@ -39,9 +39,7 @@ export const WristbandSensorsPanel: React.FC = () => {
   
   const [isStreaming, setIsStreaming] = useState(false);
   const [useSyntheticData, setUseSyntheticData] = useState(true);
-  const [selectedSensor, setSelectedSensor] = useState<SensorType>('PPG_IR');
   const [showRawValues, setShowRawValues] = useState(true);
-  const [showWaveform, setShowWaveform] = useState(true);
   
   // Filter settings
   const [filterType, setFilterType] = useState<FilterType>('none');
@@ -196,16 +194,68 @@ export const WristbandSensorsPanel: React.FC = () => {
     timeRef.current = 0;
   };
 
-  const selectedSensorData = sensors[selectedSensor];
-  const filteredBuffer = getFilteredData(selectedSensorData.buffer);
-  
-  const chartData = {
-    labels: Array(WINDOW_SIZE).fill(''),
-    datasets: [{
-      data: filteredBuffer.length > 0 ? filteredBuffer : [0],
-      color: (opacity = 1) => selectedSensorData.color || `rgba(99, 102, 241, ${opacity})`,
-      strokeWidth: 2.5,
-    }],
+  // Create chart data for multiple PPG sensors
+  const createPPGChartData = () => {
+    const ppgTypes: SensorType[] = ['PPG_IR', 'PPG_RED', 'PPG_GREEN'];
+    return {
+      labels: Array(WINDOW_SIZE).fill(''),
+      datasets: ppgTypes.map((type) => {
+        const sensor = sensors[type];
+        const filteredData = getFilteredData(sensor.buffer);
+        return {
+          data: filteredData.length > 0 ? filteredData : [0],
+          color: (opacity = 1) => sensor.color,
+          strokeWidth: 2,
+        };
+      }),
+      legend: ppgTypes.map((type) => sensors[type].label),
+    };
+  };
+
+  // Create chart data for Acc & Gyro (6 axes)
+  const createAccGyroChartData = () => {
+    const accGyroTypes: SensorType[] = ['GYRO_X', 'GYRO_Y', 'GYRO_Z', 'ACC_X', 'ACC_Y', 'ACC_Z'];
+    return {
+      labels: Array(WINDOW_SIZE).fill(''),
+      datasets: accGyroTypes.map((type) => {
+        const sensor = sensors[type];
+        const filteredData = getFilteredData(sensor.buffer);
+        return {
+          data: filteredData.length > 0 ? filteredData : [0],
+          color: (opacity = 1) => sensor.color,
+          strokeWidth: 1.5,
+        };
+      }),
+      legend: accGyroTypes.map((type) => sensors[type].label),
+    };
+  };
+
+  // Create chart data for EDA
+  const createEDAChartData = () => {
+    const sensor = sensors.EDA;
+    const filteredData = getFilteredData(sensor.buffer);
+    return {
+      labels: Array(WINDOW_SIZE).fill(''),
+      datasets: [{
+        data: filteredData.length > 0 ? filteredData : [0],
+        color: (opacity = 1) => sensor.color,
+        strokeWidth: 2.5,
+      }],
+    };
+  };
+
+  // Create chart data for Temperature
+  const createTempChartData = () => {
+    const sensor = sensors.TEMP;
+    const filteredData = getFilteredData(sensor.buffer);
+    return {
+      labels: Array(WINDOW_SIZE).fill(''),
+      datasets: [{
+        data: filteredData.length > 0 ? filteredData : [0],
+        color: (opacity = 1) => sensor.color,
+        strokeWidth: 2.5,
+      }],
+    };
   };
 
   const screenWidth = Dimensions.get('window').width;
@@ -221,30 +271,27 @@ export const WristbandSensorsPanel: React.FC = () => {
       <View style={styles.sensorGrid}>
         {sensorTypes.map((sensorType) => {
           const sensor = sensors[sensorType];
-          const isSelected = selectedSensor === sensorType;
           
           return (
-            <TouchableOpacity
+            <View
               key={sensorType}
               style={[
                 styles.sensorCard,
-                isSelected && styles.sensorCardSelected,
                 { borderLeftColor: sensor.color, borderLeftWidth: 4 }
               ]}
-              onPress={() => setSelectedSensor(sensorType)}
             >
-              <Text style={[styles.sensorLabel, isSelected && styles.sensorLabelSelected]}>
+              <Text style={styles.sensorLabel}>
                 {sensor.label}
               </Text>
-              <Text style={[styles.sensorValue, isSelected && styles.sensorValueSelected]}>
+              <Text style={styles.sensorValue}>
                 {sensor.value.toFixed(2)}
               </Text>
               {sensor.unit && (
-                <Text style={[styles.sensorUnit, isSelected && styles.sensorUnitSelected]}>
+                <Text style={styles.sensorUnit}>
                   {sensor.unit}
                 </Text>
               )}
-            </TouchableOpacity>
+            </View>
           );
         })}
       </View>
@@ -293,79 +340,247 @@ export const WristbandSensorsPanel: React.FC = () => {
         </View>
       </View>
 
-      {/* Waveform Display */}
-      {showWaveform && (
-        <View style={styles.waveformCard}>
-          <View style={styles.waveformHeader}>
-            <Text style={styles.waveformTitle}>
-              📊 {selectedSensorData.label} Waveform
-            </Text>
-            <Text style={styles.filterBadge}>
-              {filterType === 'none' ? 'Raw' : 
-               filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-               `BP ${bandPassLow}-${bandPassHigh}Hz`}
-            </Text>
-          </View>
-          
-          <View style={styles.chartContainer}>
-            <LineChart
-              data={chartData}
-              width={screenWidth - 48}
-              height={220}
-              chartConfig={{
-                backgroundColor: selectedSensorData.color,
-                backgroundGradientFrom: selectedSensorData.color,
-                backgroundGradientTo: selectedSensorData.color,
-                decimalPlaces: 1,
-                color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
-                labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
-                style: { borderRadius: 16 },
-                propsForDots: { r: '0' },
-                propsForBackgroundLines: {
-                  strokeDasharray: '',
-                  stroke: 'rgba(255, 255, 255, 0.15)',
-                  strokeWidth: 1,
-                },
-              }}
-              bezier={false}
-              style={styles.chart}
-              withInnerLines={true}
-              withOuterLines={false}
-              withVerticalLabels={false}
-              withHorizontalLabels={true}
-              fromZero={false}
-              segments={4}
-            />
-          </View>
+      {/* Waveform Displays */}
+      
+      {/* PPG Waveforms - All 3 sensors */}
+      <View style={styles.waveformCard}>
+        <View style={styles.waveformHeader}>
+          <Text style={styles.waveformTitle}>📊 PPG-IR Waveform</Text>
+          <Text style={styles.filterBadge}>
+            {filterType === 'none' ? 'Raw' : 
+             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+          </Text>
+        </View>
+        
+        <View style={styles.chartContainer}>
+          <LineChart
+            data={createPPGChartData()}
+            width={screenWidth - 48}
+            height={220}
+            chartConfig={{
+              backgroundColor: '#ef4444',
+              backgroundGradientFrom: '#ef4444',
+              backgroundGradientTo: '#dc2626',
+              decimalPlaces: 1,
+              color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
+              style: { borderRadius: 16 },
+              propsForDots: { r: '0' },
+              propsForBackgroundLines: {
+                strokeDasharray: '',
+                stroke: 'rgba(255, 255, 255, 0.15)',
+                strokeWidth: 1,
+              },
+            }}
+            bezier={false}
+            style={styles.chart}
+            withInnerLines={true}
+            withOuterLines={false}
+            withVerticalLabels={false}
+            withHorizontalLabels={true}
+            fromZero={false}
+            segments={4}
+          />
+        </View>
 
-          <View style={styles.waveformStats}>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Current</Text>
-              <Text style={[styles.statValue, { color: selectedSensorData.color }]}>
-                {selectedSensorData.value.toFixed(2)}
-              </Text>
-            </View>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Max</Text>
-              <Text style={[styles.statValue, { color: selectedSensorData.color }]}>
-                {Math.max(...filteredBuffer).toFixed(2)}
-              </Text>
-            </View>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Min</Text>
-              <Text style={[styles.statValue, { color: selectedSensorData.color }]}>
-                {Math.min(...filteredBuffer).toFixed(2)}
-              </Text>
-            </View>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Avg</Text>
-              <Text style={[styles.statValue, { color: selectedSensorData.color }]}>
-                {(filteredBuffer.reduce((a, b) => a + b, 0) / filteredBuffer.length).toFixed(2)}
-              </Text>
-            </View>
+        <View style={styles.waveformStats}>
+          {ppgSensors.map((sensorType) => {
+            const sensor = sensors[sensorType];
+            return (
+              <View key={sensorType} style={styles.stat}>
+                <Text style={styles.statLabel}>{sensor.label}</Text>
+                <Text style={[styles.statValue, { color: sensor.color }]}>
+                  {sensor.value.toFixed(2)}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* Accelerometer & Gyroscope Graph */}
+      <View style={styles.waveformCard}>
+        <View style={styles.waveformHeader}>
+          <Text style={styles.waveformTitle}>📊 Acc & Gyro</Text>
+          <Text style={styles.filterBadge}>
+            {filterType === 'none' ? 'Raw' : 
+             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+          </Text>
+        </View>
+        
+        <View style={styles.chartContainer}>
+          <LineChart
+            data={createAccGyroChartData()}
+            width={screenWidth - 48}
+            height={220}
+            chartConfig={{
+              backgroundColor: '#8b5cf6',
+              backgroundGradientFrom: '#8b5cf6',
+              backgroundGradientTo: '#7c3aed',
+              decimalPlaces: 1,
+              color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
+              style: { borderRadius: 16 },
+              propsForDots: { r: '0' },
+              propsForBackgroundLines: {
+                strokeDasharray: '',
+                stroke: 'rgba(255, 255, 255, 0.15)',
+                strokeWidth: 1,
+              },
+            }}
+            bezier={false}
+            style={styles.chart}
+            withInnerLines={true}
+            withOuterLines={false}
+            withVerticalLabels={false}
+            withHorizontalLabels={true}
+            fromZero={false}
+            segments={4}
+          />
+        </View>
+
+        <View style={styles.legendContainer}>
+          {imuSensors.map((sensorType) => {
+            const sensor = sensors[sensorType];
+            return (
+              <View key={sensorType} style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: sensor.color }]} />
+                <Text style={styles.legendText}>{sensor.label}</Text>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* EDA Graph */}
+      <View style={styles.waveformCard}>
+        <View style={styles.waveformHeader}>
+          <Text style={styles.waveformTitle}>📊 EDA</Text>
+          <Text style={styles.filterBadge}>
+            {filterType === 'none' ? 'Raw' : 
+             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+          </Text>
+        </View>
+        
+        <View style={styles.chartContainer}>
+          <LineChart
+            data={createEDAChartData()}
+            width={screenWidth - 48}
+            height={220}
+            chartConfig={{
+              backgroundColor: '#3b82f6',
+              backgroundGradientFrom: '#3b82f6',
+              backgroundGradientTo: '#2563eb',
+              decimalPlaces: 1,
+              color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
+              style: { borderRadius: 16 },
+              propsForDots: { r: '0' },
+              propsForBackgroundLines: {
+                strokeDasharray: '',
+                stroke: 'rgba(255, 255, 255, 0.15)',
+                strokeWidth: 1,
+              },
+            }}
+            bezier={false}
+            style={styles.chart}
+            withInnerLines={true}
+            withOuterLines={false}
+            withVerticalLabels={false}
+            withHorizontalLabels={true}
+            fromZero={false}
+            segments={4}
+          />
+        </View>
+
+        <View style={styles.waveformStats}>
+          <View style={styles.stat}>
+            <Text style={styles.statLabel}>Current</Text>
+            <Text style={[styles.statValue, { color: sensors.EDA.color }]}>
+              {sensors.EDA.value.toFixed(2)} {sensors.EDA.unit}
+            </Text>
+          </View>
+          <View style={styles.stat}>
+            <Text style={styles.statLabel}>Max</Text>
+            <Text style={[styles.statValue, { color: sensors.EDA.color }]}>
+              {Math.max(...getFilteredData(sensors.EDA.buffer)).toFixed(2)}
+            </Text>
+          </View>
+          <View style={styles.stat}>
+            <Text style={styles.statLabel}>Min</Text>
+            <Text style={[styles.statValue, { color: sensors.EDA.color }]}>
+              {Math.min(...getFilteredData(sensors.EDA.buffer)).toFixed(2)}
+            </Text>
           </View>
         </View>
-      )}
+      </View>
+
+      {/* Temperature Graph */}
+      <View style={styles.waveformCard}>
+        <View style={styles.waveformHeader}>
+          <Text style={styles.waveformTitle}>📊 Temp</Text>
+          <Text style={styles.filterBadge}>
+            {filterType === 'none' ? 'Raw' : 
+             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+          </Text>
+        </View>
+        
+        <View style={styles.chartContainer}>
+          <LineChart
+            data={createTempChartData()}
+            width={screenWidth - 48}
+            height={220}
+            chartConfig={{
+              backgroundColor: '#f59e0b',
+              backgroundGradientFrom: '#f59e0b',
+              backgroundGradientTo: '#d97706',
+              decimalPlaces: 1,
+              color: (opacity = 1) => `rgba(255, 255, 255, ${opacity})`,
+              labelColor: (opacity = 1) => `rgba(255, 255, 255, ${0.7 * opacity})`,
+              style: { borderRadius: 16 },
+              propsForDots: { r: '0' },
+              propsForBackgroundLines: {
+                strokeDasharray: '',
+                stroke: 'rgba(255, 255, 255, 0.15)',
+                strokeWidth: 1,
+              },
+            }}
+            bezier={false}
+            style={styles.chart}
+            withInnerLines={true}
+            withOuterLines={false}
+            withVerticalLabels={false}
+            withHorizontalLabels={true}
+            fromZero={false}
+            segments={4}
+          />
+        </View>
+
+        <View style={styles.waveformStats}>
+          <View style={styles.stat}>
+            <Text style={styles.statLabel}>Current</Text>
+            <Text style={[styles.statValue, { color: sensors.TEMP.color }]}>
+              {sensors.TEMP.value.toFixed(2)} {sensors.TEMP.unit}
+            </Text>
+          </View>
+          <View style={styles.stat}>
+            <Text style={styles.statLabel}>Max</Text>
+            <Text style={[styles.statValue, { color: sensors.TEMP.color }]}>
+              {Math.max(...getFilteredData(sensors.TEMP.buffer)).toFixed(2)}
+            </Text>
+          </View>
+          <View style={styles.stat}>
+            <Text style={styles.statLabel}>Min</Text>
+            <Text style={[styles.statValue, { color: sensors.TEMP.color }]}>
+              {Math.min(...getFilteredData(sensors.TEMP.buffer)).toFixed(2)}
+            </Text>
+          </View>
+        </View>
+      </View>
 
       {/* Filter Controls */}
       <View style={styles.filterCard}>
@@ -729,34 +944,43 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderLeftWidth: 4,
   },
-  sensorCardSelected: {
-    backgroundColor: '#eef2ff',
-    elevation: 3,
-  },
   sensorLabel: {
     fontSize: 12,
     fontWeight: '600',
     color: '#64748b',
     marginBottom: 4,
   },
-  sensorLabelSelected: {
-    color: '#4f46e5',
-  },
   sensorValue: {
     fontSize: 18,
     fontWeight: 'bold',
     color: '#1e293b',
-  },
-  sensorValueSelected: {
-    color: '#4f46e5',
   },
   sensorUnit: {
     fontSize: 11,
     color: '#94a3b8',
     marginTop: 2,
   },
-  sensorUnitSelected: {
-    color: '#6366f1',
+  legendContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    paddingTop: 12,
+    gap: 12,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  legendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  legendText: {
+    fontSize: 11,
+    color: '#64748b',
+    fontWeight: '600',
   },
   infoCard: {
     backgroundColor: '#f8fafc',
