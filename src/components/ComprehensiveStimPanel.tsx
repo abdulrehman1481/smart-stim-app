@@ -13,6 +13,8 @@ import {
 import { LineChart } from 'react-native-chart-kit';
 import { useBLE } from '../functionality/BLEContext';
 import { bleService } from '../functionality/BLEService';
+import { useAuth } from '../auth/AuthContext';
+import { saveStimulationEvent } from '../firebase/dataLogger';
 import {
   StimMode,
   STIM_MODE_NAMES,
@@ -40,6 +42,7 @@ interface WaveformData {
 
 export const ComprehensiveStimPanel: React.FC = () => {
   const { isConnected, connectedDeviceName, receivedMessages } = useBLE();
+  const { user } = useAuth();
   
   // Channel 0 configuration
   const [ch0Enabled, setCh0Enabled] = useState(false);
@@ -48,6 +51,7 @@ export const ComprehensiveStimPanel: React.FC = () => {
   const [ch0PulseWidth, setCh0PulseWidth] = useState(500);
   const [ch0Frequency, setCh0Frequency] = useState(50);
   const [ch0BurstMode, setCh0BurstMode] = useState(false);
+  const [enableFirebaseLogging, setEnableFirebaseLogging] = useState(false);
   const [ch0BurstDuration, setCh0BurstDuration] = useState(1000); // ms
   const [ch0BurstInterval, setCh0BurstInterval] = useState(2000); // ms
   
@@ -276,6 +280,34 @@ export const ComprehensiveStimPanel: React.FC = () => {
     
     if (newState) {
       setIsMonitoring(true);
+      
+      // Log stimulation event to Firebase
+      if (enableFirebaseLogging && user) {
+        const ch0Active = ch0Enabled;
+        const ch1Active = ch1Enabled;
+        
+        if (ch0Active) {
+          saveStimulationEvent(user.uid, {
+            waveform: STIM_MODE_NAMES[ch0Mode],
+            frequency: ch0Frequency,
+            amplitude: intensityToAmplitude(ch0Intensity),
+            pulseWidth: ch0PulseWidth,
+            duration: 0, // Duration tracked separately
+            deviceName: connectedDeviceName || undefined,
+          }).catch(err => console.error('[Firebase] Failed to log stim event:', err));
+        }
+        
+        if (ch1Active) {
+          saveStimulationEvent(user.uid, {
+            waveform: STIM_MODE_NAMES[ch1Mode],
+            frequency: ch1Frequency,
+            amplitude: intensityToAmplitude(ch1Intensity),
+            pulseWidth: ch1PulseWidth,
+            duration: 0,
+            deviceName: connectedDeviceName || undefined,
+          }).catch(err => console.error('[Firebase] Failed to log stim event:', err));
+        }
+      }
     }
   };
 
@@ -514,6 +546,24 @@ export const ComprehensiveStimPanel: React.FC = () => {
         </View>
       </View>
 
+      {/* Firebase Logging Toggle (only show if user is logged in) */}
+      {user && (
+        <View style={styles.masterControl}>
+          <View style={styles.sessionRow}>
+            <Text style={styles.sessionLabel}>🔥 Firebase Logging</Text>
+            <Switch 
+              value={enableFirebaseLogging} 
+              onValueChange={setEnableFirebaseLogging} 
+            />
+          </View>
+          <Text style={styles.firebaseHint}>
+            {enableFirebaseLogging 
+              ? '✓ Stimulation events will be logged to your account' 
+              : 'Enable to save stimulation data to Firebase'}
+          </Text>
+        </View>
+      )}
+
       {/* Audio Control */}
       <View style={styles.audioCard}>
         <View style={styles.audioHeader}>
@@ -707,6 +757,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#374151',
+  },
+  firebaseHint: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   durationControls: {
     flexDirection: 'row',

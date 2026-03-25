@@ -10,6 +10,9 @@ import {
 import { useBLE } from '../functionality/BLEContext';
 import { BLEDevice } from '../functionality/BLEService';
 import { BLEProtocol } from '../functionality/BLEProtocols';
+import { BluetoothStatusBanner } from './BluetoothStatusBanner';
+import { theme } from '../styles/theme';
+import { Button, Badge, Card } from './shared/StyledComponents';
 
 export const DeviceScanner: React.FC = () => {
   const {
@@ -32,43 +35,45 @@ export const DeviceScanner: React.FC = () => {
     const isPreferred = item.protocol !== undefined;
     const isThisConnected = isConnected && connectedDeviceName === item.name;
     const protocolBadge = item.protocol?.name.split(' ')[0] || '?';
+    const protocolVariant = item.protocol?.type === 'NORDIC_UART' ? 'info' as const : 'success' as const;
 
     return (
       <TouchableOpacity
-        style={[
-          styles.deviceItem,
-          isPreferred && styles.preferredDevice,
-          isThisConnected && styles.connectedDevice,
-        ]}
         onPress={() => !isConnected && connectToDevice(item.id)}
         disabled={isConnected}
+        style={{ marginBottom: theme.spacing.sm }}
       >
-        <View style={styles.deviceInfo}>
-          <View style={styles.deviceNameRow}>
-            <Text style={[styles.deviceName, isThisConnected && styles.connectedText]}>
-              {deviceName}
-              {isThisConnected && ' (Connected)'}
+        <Card
+          variant={isThisConnected ? 'elevated' : isPreferred ? 'outlined' : 'default'}
+          style={[
+            isThisConnected && { borderColor: theme.colors.success, borderWidth: 2, backgroundColor: '#f0fdf4' },
+            isPreferred && !isThisConnected && { borderColor: theme.colors.primary }
+          ]}
+        >
+          <View style={styles.deviceInfo}>
+            <View style={styles.deviceNameRow}>
+              <Text style={[styles.deviceName, isThisConnected && { color: theme.colors.success }]}>
+                {deviceName}
+                {isThisConnected && ' (Connected)'}
+              </Text>
+              {item.protocol && (
+                <Badge variant={protocolVariant}>{protocolBadge}</Badge>
+              )}
+            </View>
+            <Text style={styles.deviceDetails}>
+              {item.id} | RSSI: {item.rssi || 'N/A'}
             </Text>
-            {item.protocol && (
-              <View style={[
-                styles.protocolBadge,
-                item.protocol.type === 'NORDIC_UART' && styles.nordicBadge,
-                item.protocol.type === 'ESP32_CUSTOM' && styles.esp32Badge,
-              ]}>
-                <Text style={styles.protocolBadgeText}>{protocolBadge}</Text>
-              </View>
-            )}
           </View>
-          <Text style={styles.deviceDetails}>
-            {item.id} | RSSI: {item.rssi || 'N/A'}
-          </Text>
-        </View>
+        </Card>
       </TouchableOpacity>
     );
   };
 
   return (
     <View style={styles.container}>
+      {/* Bluetooth Status Banner */}
+      <BluetoothStatusBanner />
+      
       <View style={styles.header}>
         <Text style={styles.title}>📡 BLE Devices</Text>
         {isConnected && (
@@ -112,33 +117,39 @@ export const DeviceScanner: React.FC = () => {
         <View style={styles.buttonRow}>
           {!isConnected ? (
             <>
-              <TouchableOpacity
-                style={[styles.button, styles.scanButton, isScanning && styles.buttonDisabled]}
+              <Button
+                variant="primary"
+                size="md"
                 onPress={startScan}
                 disabled={isScanning}
+                style={{ flex: 1 }}
               >
                 {isScanning ? (
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
-                  <Text style={styles.buttonText}>Scan</Text>
+                  'Scan'
                 )}
-              </TouchableOpacity>
+              </Button>
               {isScanning && (
-                <TouchableOpacity
-                  style={[styles.button, styles.stopButton]}
+                <Button
+                  variant="danger"
+                  size="md"
                   onPress={stopScan}
+                  style={{ flex: 1 }}
                 >
-                  <Text style={styles.buttonText}>Stop</Text>
-                </TouchableOpacity>
+                  Stop
+                </Button>
               )}
             </>
           ) : (
-            <TouchableOpacity
-              style={[styles.button, styles.disconnectButton]}
+            <Button
+              variant="danger"
+              size="md"
               onPress={disconnectDevice}
+              style={{ flex: 1 }}
             >
-              <Text style={styles.buttonText}>Disconnect</Text>
-            </TouchableOpacity>
+              Disconnect
+            </Button>
           )}
         </View>
       </View>
@@ -167,60 +178,59 @@ export const DeviceScanner: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: theme.colors.background,
   },
   header: {
-    backgroundColor: '#1e3a8a',
-    padding: 16,
-    paddingTop: 20,
+    backgroundColor: theme.colors.primary,
+    padding: theme.spacing.md,
+    paddingTop: theme.spacing.lg,
   },
   title: {
-    fontSize: 20,
-    fontWeight: 'bold',
+    ...theme.typography.h3,
     color: '#fff',
-    marginBottom: 4,
+    marginBottom: theme.spacing.xs,
   },
   connectedInfo: {
-    fontSize: 12,
-    color: '#93c5fd',
-    marginBottom: 8,
+    ...theme.typography.caption,
+    color: 'rgba(255, 255, 255, 0.8)',
+    marginBottom: theme.spacing.sm,
   },
   protocolFilter: {
-    marginBottom: 12,
+    marginBottom: theme.spacing.md,
   },
   filterLabel: {
-    fontSize: 12,
-    color: '#93c5fd',
-    marginBottom: 6,
+    ...theme.typography.caption,
+    color: 'rgba(255, 255, 255, 0.8)',
+    marginBottom: theme.spacing.xs,
     fontWeight: '600',
   },
   protocolChips: {
     flexDirection: 'row',
-    gap: 8,
+    gap: theme.spacing.sm,
     flexWrap: 'wrap',
   },
   protocolChip: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: '#334155',
+    paddingVertical: theme.spacing.xs,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     borderWidth: 1,
-    borderColor: '#475569',
+    borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   protocolChipSelected: {
     borderWidth: 2,
   },
   nordicChip: {
-    backgroundColor: '#1e40af',
-    borderColor: '#3b82f6',
+    backgroundColor: 'rgba(59, 130, 246, 0.3)',
+    borderColor: theme.colors.info,
   },
   esp32Chip: {
-    backgroundColor: '#065f46',
-    borderColor: '#10b981',
+    backgroundColor: 'rgba(16, 185, 129, 0.3)',
+    borderColor: theme.colors.success,
   },
   protocolChipText: {
-    fontSize: 12,
-    color: '#94a3b8',
+    ...theme.typography.caption,
+    color: 'rgba(255, 255, 255, 0.7)',
     fontWeight: '600',
   },
   protocolChipTextSelected: {
@@ -228,61 +238,13 @@ const styles = StyleSheet.create({
   },
   buttonRow: {
     flexDirection: 'row',
-    gap: 8,
-  },
-  button: {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    minWidth: 100,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scanButton: {
-    backgroundColor: '#3b82f6',
-  },
-  stopButton: {
-    backgroundColor: '#ef4444',
-  },
-  disconnectButton: {
-    backgroundColor: '#ef4444',
-  },
-  buttonDisabled: {
-    backgroundColor: '#94a3b8',
-  },
-  buttonText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 14,
+    gap: theme.spacing.sm,
   },
   list: {
     flex: 1,
   },
   listContent: {
-    padding: 12,
-  },
-  deviceItem: {
-    backgroundColor: '#fff',
-    padding: 16,
-    marginBottom: 8,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-  },
-  preferredDevice: {
-    borderColor: '#3b82f6',
-    borderWidth: 2,
-    backgroundColor: '#eff6ff',
-  },
-  connectedDevice: {
-    borderColor: '#10b981',
-    borderWidth: 2,
-    backgroundColor: '#d1fae5',
+    padding: theme.spacing.md,
   },
   deviceInfo: {
     flex: 1,
@@ -291,47 +253,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 4,
+    marginBottom: theme.spacing.xs,
   },
   deviceName: {
-    fontSize: 16,
+    ...theme.typography.body,
     fontWeight: '600',
-    color: '#1f2937',
+    color: theme.colors.text,
     flex: 1,
   },
-  protocolBadge: {
-    paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    marginLeft: 8,
-  },
-  nordicBadge: {
-    backgroundColor: '#dbeafe',
-  },
-  esp32Badge: {
-    backgroundColor: '#d1fae5',
-  },
-  protocolBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#1f2937',
-  },
-  connectedText: {
-    color: '#059669',
-  },
   deviceDetails: {
-    fontSize: 12,
-    color: '#6b7280',
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   emptyState: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 32,
+    padding: theme.spacing.xl,
   },
   emptyText: {
-    fontSize: 16,
-    color: '#6b7280',
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     textAlign: 'center',
+    lineHeight: 24,
   },
 });

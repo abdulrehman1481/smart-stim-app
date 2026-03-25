@@ -11,6 +11,9 @@ import {
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { useBLE } from '../functionality/BLEContext';
+import { useAuth } from '../auth/AuthContext';
+import { saveSensorReading } from '../firebase/dataLogger';
+import { useSensorPipeline } from '../hooks/useSensorPipeline';
 
 const WINDOW_SIZE = 100;
 const UPDATE_INTERVAL = 100; // 100ms = 10Hz sampling
@@ -36,10 +39,15 @@ interface FilterConfig {
 
 export const WristbandSensorsPanel: React.FC = () => {
   const { isConnected, connectedDeviceName, receivedMessages } = useBLE();
+  const { user } = useAuth();
+
+  // Live sensor data from the BLE→Parse→Firebase pipeline
+  const { live, session, startSession, stopSession } = useSensorPipeline();
   
   const [isStreaming, setIsStreaming] = useState(false);
-  const [useSyntheticData, setUseSyntheticData] = useState(true);
+  const [useSyntheticData, setUseSyntheticData] = useState(false);
   const [showRawValues, setShowRawValues] = useState(true);
+  const [enableFirebaseLogging, setEnableFirebaseLogging] = useState(true);
   
   // Filter settings
   const [filterType, setFilterType] = useState<FilterType>('none');
@@ -66,6 +74,8 @@ export const WristbandSensorsPanel: React.FC = () => {
   
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const timeRef = useRef(0);
+  const firebaseLogCounterRef = useRef(0);
+  const FIREBASE_LOG_INTERVAL = 50; // Log every 50th sample to avoid overwhelming Firestore
 
   // Simple low-pass filter implementation
   const applyLowPassFilter = (data: number[], cutoff: number): number[] => {
@@ -145,7 +155,77 @@ export const WristbandSensorsPanel: React.FC = () => {
     
     setSensors(newSensors);
     timeRef.current += UPDATE_INTERVAL / 1000;
-  }, [sensors]);
+    
+    // Optional Firebase logging (throttled)
+    if (enableFirebaseLogging && user) {
+      firebaseLogCounterRef.current++;
+      if (firebaseLogCounterRef.current >= FIREBASE_LOG_INTERVAL) {
+        firebaseLogCounterRef.current = 0;
+        // Log key sensors (HR, TEMP, EDA) to Firebase
+        (['HR', 'TEMP', 'EDA'] as SensorType[]).forEach(sensorType => {
+          const sensor = newSensors[sensorType];
+          saveSensorReading(user.uid, {
+            sensorType,
+            value: sensor.value,
+            unit: sensor.unit,
+            deviceName: connectedDeviceName || 'Synthetic',
+          }).catch(err => console.error('[Firebase] Failed to log:', err));
+        });
+      }
+    }
+  }, [sensors, enableFirebaseLogging, user, connectedDeviceName]);
+
+  // Sync real BLE sensor data into the display buffers whenever live state changes.
+  // Does NOT require isStreaming so values are always visible when connected.
+  useEffect(() => {
+    if (useSyntheticData) return;
+
+    setSensors(prev => {
+      const updated = { ...prev };
+
+      // Temperature (AS6221)
+      if (live.temperature.lastUpdated) {
+        const temp = live.temperature.tempC;
+        updated.TEMP = {
+          ...updated.TEMP,
+          value: temp,
+          buffer: [...updated.TEMP.buffer.slice(1), temp],
+        };
+      }
+
+      // PPG (MAX30101) — normalise to thousands for display
+      if (live.ppg.lastUpdated) {
+        const irNorm  = live.ppg.ir    / 1000;
+        const redNorm = live.ppg.red   / 1000;
+        const grnNorm = live.ppg.green / 1000;
+        updated.PPG_IR    = { ...updated.PPG_IR,    value: irNorm,  buffer: [...updated.PPG_IR.buffer.slice(1),    irNorm]  };
+        updated.PPG_RED   = { ...updated.PPG_RED,   value: redNorm, buffer: [...updated.PPG_RED.buffer.slice(1),   redNorm] };
+        updated.PPG_GREEN = { ...updated.PPG_GREEN, value: grnNorm, buffer: [...updated.PPG_GREEN.buffer.slice(1), grnNorm] };
+      }
+
+      // Accelerometer (LSM6DSO) — in mg
+      if (live.accel.lastUpdated) {
+        updated.ACC_X = { ...updated.ACC_X, value: live.accel.x, buffer: [...updated.ACC_X.buffer.slice(1), live.accel.x] };
+        updated.ACC_Y = { ...updated.ACC_Y, value: live.accel.y, buffer: [...updated.ACC_Y.buffer.slice(1), live.accel.y] };
+        updated.ACC_Z = { ...updated.ACC_Z, value: live.accel.z, buffer: [...updated.ACC_Z.buffer.slice(1), live.accel.z] };
+      }
+
+      // Gyroscope (LSM6DSO) — in mdps
+      if (live.gyro.lastUpdated) {
+        updated.GYRO_X = { ...updated.GYRO_X, value: live.gyro.x, buffer: [...updated.GYRO_X.buffer.slice(1), live.gyro.x] };
+        updated.GYRO_Y = { ...updated.GYRO_Y, value: live.gyro.y, buffer: [...updated.GYRO_Y.buffer.slice(1), live.gyro.y] };
+        updated.GYRO_Z = { ...updated.GYRO_Z, value: live.gyro.z, buffer: [...updated.GYRO_Z.buffer.slice(1), live.gyro.z] };
+      }
+
+      // EDA (ADS1113)
+      if (live.eda.lastUpdated) {
+        const cond = live.eda.conductance_uS;
+        updated.EDA = { ...updated.EDA, value: cond, buffer: [...updated.EDA.buffer.slice(1), cond] };
+      }
+
+      return updated;
+    });
+  }, [live, isStreaming, useSyntheticData]);
 
   // Start/stop streaming
   useEffect(() => {
@@ -171,16 +251,26 @@ export const WristbandSensorsPanel: React.FC = () => {
   }, [isStreaming, useSyntheticData, generateSyntheticSensorData]);
 
   const handleStartStop = () => {
-    if (!useSyntheticData && !isConnected) {
+    if (!isConnected) {
       Alert.alert(
         'Not Connected',
-        'Please connect to wristband device first or enable synthetic data mode.',
+        'Please connect to the SMARTWATCH device via the Devices tab before streaming.',
         [{ text: 'OK' }]
       );
       return;
     }
-    
-    setIsStreaming(!isStreaming);
+
+    const nextStreaming = !isStreaming;
+    setIsStreaming(nextStreaming);
+
+    // Always start / stop a Firestore recording session with streaming
+    if (user) {
+      if (nextStreaming) {
+        startSession(`Wristband ${new Date().toLocaleString()}`);
+      } else {
+        stopSession();
+      }
+    }
   };
 
   const handleClear = () => {
@@ -330,14 +420,22 @@ export const WristbandSensorsPanel: React.FC = () => {
           </TouchableOpacity>
         </View>
         
-        <View style={styles.settingRow}>
-          <Text style={styles.settingLabel}>Synthetic Data Mode</Text>
-          <Switch
-            value={useSyntheticData}
-            onValueChange={setUseSyntheticData}
-            disabled={isStreaming}
-          />
-        </View>
+        {/* Connection & Firebase status */}
+        {!isConnected && (
+          <View style={[styles.settingRow, { marginTop: 4 }]}>
+            <Text style={{ fontSize: 13, color: '#ef4444', fontWeight: '600' }}>
+              ⚠️  Not connected — go to Devices tab to pair SMARTWATCH
+            </Text>
+          </View>
+        )}
+
+        {session.isRecording && (
+          <View style={[styles.settingRow, { marginTop: 10 }]}>
+            <Text style={{ fontSize: 12, color: '#10b981', fontWeight: '600' }}>
+              📡 Saving to Firebase • {session.dataPointsSaved} pts
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* Waveform Displays */}

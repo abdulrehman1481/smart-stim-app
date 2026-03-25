@@ -8,7 +8,11 @@ import {
   NORDIC_UART_PROTOCOL, 
   ESP32_PROTOCOL,
   SUPPORTED_PROTOCOLS,
-  getProtocolByServiceUUID 
+  getProtocolByServiceUUID,
+  matchesPreferredDeviceName,
+  LOG_SERVICE_UUID,
+  LOG_NOTIFY_UUID,
+  NRF_LOG_PROTOCOL,
 } from './BLEProtocols';
 
 // For backward compatibility
@@ -35,8 +39,28 @@ class BLEService {
   private dataCallback: BLEDataCallback | null = null;
   private errorCallback: BLEErrorCallback | null = null;
   private connectionCallback: BLEConnectionCallback | null = null;
-  private currentProtocol: BLEProtocol = NORDIC_UART_PROTOCOL; // Default to Nordic UART
-  private selectedProtocols: BLEProtocol[] = SUPPORTED_PROTOCOLS; // Scan for all by default
+  private currentProtocol: BLEProtocol = NORDIC_UART_PROTOCOL;
+  private selectedProtocols: BLEProtocol[] = SUPPORTED_PROTOCOLS;
+
+  /**
+   * Set to true while an intentional disconnect is in progress.
+   * Prevents the `onDisconnected` event handler (registered during connect)
+   * from firing the connectionCallback a second time when we explicitly call
+   * cancelDeviceConnection(), which would cause duplicate React state updates
+   * and potentially crash the app.
+   */
+  private isIntentionalDisconnect = false;
+
+  /**
+   * Line-reassembly buffer.
+   *
+   * The nRF52840 BLE log backend sends log messages as raw UTF-8 bytes
+   * followed by a separate \r\n packet. The BLE radio fragments payloads
+   * into MTU-sized chunks (~20 bytes at 23-byte MTU). Each chunk arrives
+   * as its own GATT notification, so we must buffer them and only emit
+   * a line to callers once we see a newline terminator.
+   */
+  private rxLineBuffer: string = '';
 
   constructor() {
     this.manager = new BleManager();
@@ -162,15 +186,26 @@ class BLEService {
           if (device) {
             // Get device name, preferring 'name' over 'localName'
             const deviceName = device.name || device.localName || 'Unknown Device';
+            const advertisedServiceUUIDs = (device.serviceUUIDs ?? []).map((uuid) => uuid.toLowerCase());
             
             // Show ALL devices regardless of signal strength
             // Let user decide which to connect to
 
             // Try to determine which protocol this device uses based on name
-            // We'll verify this during connection by checking service UUIDs
+            // or advertised services. We'll verify this during connection too.
             let detectedProtocol: BLEProtocol | undefined;
+
+            // Prefer advertised service UUID match when available.
             for (const protocol of this.selectedProtocols) {
-              if (protocol.preferredDeviceName && deviceName.toLowerCase().includes(protocol.preferredDeviceName.toLowerCase())) {
+              if (advertisedServiceUUIDs.includes(protocol.serviceUUID.toLowerCase())) {
+                detectedProtocol = protocol;
+                break;
+              }
+            }
+
+            // Fallback to tolerant device-name matching.
+            for (const protocol of this.selectedProtocols) {
+              if (!detectedProtocol && matchesPreferredDeviceName(protocol, deviceName)) {
                 detectedProtocol = protocol;
                 break;
               }
@@ -278,10 +313,16 @@ class BLEService {
         console.log('[BLE] Setting up notifications...');
         await this.setupNotifications();
 
-        // Monitor disconnection
+        // Monitor disconnection (unexpected / BLE-initiated only)
         device.onDisconnected((error, disconnectedDevice) => {
-          console.log('[BLE] Device disconnected:', disconnectedDevice?.name || disconnectedDevice?.id);
+          // If we called disconnect() intentionally, skip — it already fires
+          // connectionCallback and setting the flag prevents a double-trigger
+          // which can cause React state thrashing and app crashes on Android.
+          if (this.isIntentionalDisconnect) return;
+
+          console.log('[BLE] Device disconnected (remote):', disconnectedDevice?.name || disconnectedDevice?.id);
           this.connectedDevice = null;
+          this.rxLineBuffer = '';
           if (this.connectionCallback) {
             this.connectionCallback(false);
           }
@@ -320,41 +361,86 @@ class BLEService {
       return;
     }
 
+    // Clear any stale fragment from a previous session
+    this.rxLineBuffer = '';
+
     try {
       const protocol = this.currentProtocol;
       console.log('[BLE] Setting up notifications for', protocol.name, 'TX characteristic');
       
-      // Monitor TX characteristic (device sends data to app)
+      /**
+       * Shared notification handler with line-reassembly.
+       *
+       * BLE MTU fragments (~20 bytes) are accumulated in `rxLineBuffer`.
+       * Complete lines (terminated by \n) are extracted and forwarded to
+       * `dataCallback` one at a time.  Partial fragments are held in the
+       * buffer until the next notification completes them.
+       */
+      const handleRawNotify = (error: any, characteristic: Characteristic | null, source: string) => {
+        if (error) {
+          if (error.errorCode !== 2 && !error.message?.includes('was cancelled')) {
+            console.warn(`[BLE] ${source} notification error:`, error.message);
+          }
+          return;
+        }
+        if (!characteristic?.value) return;
+
+        try {
+          const chunk = this.decodeBase64(characteristic.value);
+
+          // Append chunk to the reassembly buffer
+          this.rxLineBuffer += chunk;
+
+          // Normalise CRLF → LF
+          this.rxLineBuffer = this.rxLineBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+          // Extract every complete line from the buffer
+          let newlineIdx: number;
+          while ((newlineIdx = this.rxLineBuffer.indexOf('\n')) !== -1) {
+            const completeLine = this.rxLineBuffer.slice(0, newlineIdx).trim();
+            this.rxLineBuffer = this.rxLineBuffer.slice(newlineIdx + 1);
+
+            if (completeLine && this.dataCallback) {
+              this.dataCallback(completeLine);
+            }
+          }
+
+          // Guard: if somehow the buffer grows beyond 4 KB without a newline
+          // (e.g. binary garbage), discard it to prevent memory bloat.
+          if (this.rxLineBuffer.length > 4096) {
+            console.warn('[BLE] rxLineBuffer overflow – discarding stale data');
+            this.rxLineBuffer = '';
+          }
+        } catch (decodeError) {
+          console.error('[BLE] Failed to decode received data:', decodeError);
+        }
+      };
+
+      // ── 1. Primary TX / notify characteristic ─────────────────────────────
+      // For NRF_LOG_PROTOCOL: protocol.txCharUUID IS the log notify char.
+      // For UART protocols: this is the UART TX (data from device).
       this.connectedDevice.monitorCharacteristicForService(
         protocol.serviceUUID,
         protocol.txCharUUID,
-        (error, characteristic) => {
-          if (error) {
-            // Some errors are expected during normal operation (like when device disconnects)
-            // Only log severe errors to avoid spamming the console
-            if (error.errorCode !== 2 && !error.message?.includes('was cancelled')) {
-              console.warn('[BLE] Notification error:', error.message, 'Code:', error.errorCode);
-            }
-            return;
-          }
-
-          if (characteristic?.value) {
-            try {
-              const decodedData = this.decodeBase64(characteristic.value);
-              // Only log if data is significant (avoid spam from continuous streaming)
-              if (decodedData.length < 100 || decodedData.includes('ERROR') || decodedData.includes('OK')) {
-                console.log('[BLE] RX:', decodedData.substring(0, 50) + (decodedData.length > 50 ? '...' : ''));
-              }
-              if (this.dataCallback) {
-                this.dataCallback(decodedData);
-              }
-            } catch (decodeError) {
-              console.error('[BLE] Failed to decode received data:', decodeError);
-            }
-          }
-        }
+        (error, char) => handleRawNotify(error, char, 'PRIMARY-NOTIFY')
       );
-      
+
+      // ── 2. nRF Zephyr BLE Log Service (secondary fallback) ────────────────
+      // Only subscribe separately when the current protocol is NOT already the
+      // log service (otherwise we'd double-subscribe the same characteristic).
+      if (protocol.type !== BLEProtocolType.NRF_LOG_SERVICE) {
+        try {
+          this.connectedDevice.monitorCharacteristicForService(
+            LOG_SERVICE_UUID,
+            LOG_NOTIFY_UUID,
+            (error, char) => handleRawNotify(error, char, 'LOG-NOTIFY')
+          );
+          console.log('[BLE] ✓ Sensor-log notifications enabled (LOG_NOTIFY_UUID)');
+        } catch (logErr: any) {
+          console.log('[BLE] Log-service not available on this device (OK):', logErr?.message);
+        }
+      }
+
       console.log('[BLE] ✓ Notifications enabled');
     } catch (error: any) {
       console.error('[BLE] Failed to setup notifications:', error);
@@ -403,19 +489,29 @@ class BLEService {
 
   // Disconnect from device
   async disconnect(): Promise<void> {
-    if (this.connectedDevice) {
-      try {
-        console.log('[BLE] Disconnecting from device:', this.connectedDevice.name || this.connectedDevice.id);
-        await this.manager.cancelDeviceConnection(this.connectedDevice.id);
-        this.connectedDevice = null;
-        if (this.connectionCallback) {
-          this.connectionCallback(false);
-        }
-        console.log('[BLE] ✓ Disconnected successfully');
-      } catch (error: any) {
-        console.error('[BLE] Disconnect error:', error);
-        this.handleError(`Disconnect error: ${error?.message || error}`);
+    if (!this.connectedDevice) return;
+    try {
+      console.log('[BLE] Disconnecting from device:', this.connectedDevice.name || this.connectedDevice.id);
+      // Guard flag prevents onDisconnected from firing a 2nd connectionCallback
+      this.isIntentionalDisconnect = true;
+      await this.manager.cancelDeviceConnection(this.connectedDevice.id);
+      this.connectedDevice = null;
+      this.rxLineBuffer = ''; // discard any partial line
+      // Single authoritative callback — onDisconnected is suppressed by flag
+      if (this.connectionCallback) {
+        this.connectionCallback(false);
       }
+      console.log('[BLE] ✓ Disconnected successfully');
+    } catch (error: any) {
+      console.error('[BLE] Disconnect error:', error);
+      this.connectedDevice = null;
+      this.rxLineBuffer = '';
+      if (this.connectionCallback) {
+        this.connectionCallback(false);
+      }
+      this.handleError(`Disconnect error: ${error?.message || error}`);
+    } finally {
+      this.isIntentionalDisconnect = false;
     }
   }
 

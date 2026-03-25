@@ -5,9 +5,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Switch,
   Dimensions,
-  Alert,
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { useBLE } from '../functionality/BLEContext';
@@ -29,11 +27,10 @@ export const WaveformPlot: React.FC = () => {
   
   // State
   const [isStreaming, setIsStreaming] = useState(false);
-  const [useSyntheticData, setUseSyntheticData] = useState(true);
   const [waveformType, setWaveformType] = useState<'sine' | 'square' | 'sawtooth' | 'biphasic'>('biphasic');
   const [dataBuffer, setDataBuffer] = useState<number[]>(Array(WINDOW_SIZE).fill(0));
   const [sampleCount, setSampleCount] = useState(0);
-  const [frequency, setFrequency] = useState(50); // Hz for synthetic data
+  const [frequency, setFrequency] = useState(50); // Hz for waveform
   const [amplitude, setAmplitude] = useState(100); // Max amplitude
   
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -108,9 +105,9 @@ export const WaveformPlot: React.FC = () => {
     setSampleCount(prev => prev + 1);
   }, []);
 
-  // Start/stop streaming - optimized
+  // Start/stop streaming — always visualise the configured waveform shape
   useEffect(() => {
-    if (isStreaming && useSyntheticData) {
+    if (isStreaming) {
       timeRef.current = 0;
       
       intervalRef.current = setInterval(() => {
@@ -130,21 +127,19 @@ export const WaveformPlot: React.FC = () => {
         intervalRef.current = null;
       }
     }
-  }, [isStreaming, useSyntheticData, generateSyntheticSample, addDataPoint]);
+  }, [isStreaming, generateSyntheticSample, addDataPoint]);
 
-  // Monitor BLE messages for waveform data
+  // Monitor BLE messages for real waveform feedback (WAVE:<value> format)
   useEffect(() => {
-    if (!useSyntheticData && isStreaming && receivedMessages.length > 0) {
+    if (isStreaming && receivedMessages.length > 0) {
       const lastMessage = receivedMessages[receivedMessages.length - 1];
-      // Extract the actual message content (remove timestamp and RX: prefix)
       const messageContent = lastMessage.split('RX: ')[1] || lastMessage;
       const waveValue = parseWaveformFromBLE(messageContent);
-      
       if (waveValue !== null) {
         addDataPoint(waveValue);
       }
     }
-  }, [receivedMessages, useSyntheticData, isStreaming]);
+  }, [receivedMessages, isStreaming]);
 
   // Memoized chart data for performance
   const chartData: WaveformData = useMemo(() => ({
@@ -166,15 +161,6 @@ export const WaveformPlot: React.FC = () => {
   }, [dataBuffer]);
 
   const handleStartStop = () => {
-    if (!useSyntheticData && !isConnected) {
-      Alert.alert(
-        'Not Connected',
-        'Please connect to a BLE device first or enable synthetic data mode.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-    
     setIsStreaming(!isStreaming);
     if (!isStreaming) {
       setSampleCount(0);
@@ -328,27 +314,11 @@ export const WaveformPlot: React.FC = () => {
         {/* Data Source Control */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Settings</Text>
-          <View style={styles.settingRow}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Synthetic Data Mode</Text>
-              <Text style={styles.settingDescription}>
-                {useSyntheticData ? 'Using test waveforms' : 'Receiving from device'}
-              </Text>
-            </View>
-            <Switch
-              value={useSyntheticData}
-              onValueChange={setUseSyntheticData}
-              trackColor={{ false: '#e5e7eb', true: '#a5b4fc' }}
-              thumbColor={useSyntheticData ? '#6366f1' : '#9ca3af'}
-              disabled={isStreaming}
-            />
-          </View>
-          
-          {!useSyntheticData && !isConnected && (
+          {!isConnected && (
             <View style={styles.warningBox}>
               <Text style={styles.warningIcon}>⚠️</Text>
               <Text style={styles.warningText}>
-                No device connected. Connect via Devices tab.
+                Not connected — connect via Devices tab to receive real waveform data.
               </Text>
             </View>
           )}

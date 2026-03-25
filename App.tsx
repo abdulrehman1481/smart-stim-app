@@ -1,126 +1,67 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, StatusBar } from 'react-native';
+import React from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
+import { AuthProvider, useAuth } from './src/auth/AuthContext';
 import { BLEProvider } from './src/functionality/BLEContext';
-import { DeviceScanner } from './src/components/DeviceScanner';
-import { ComprehensiveStimPanel } from './src/components/ComprehensiveStimPanel';
-import { WristbandSensorsPanel } from './src/components/WristbandSensorsPanel';
+import { ActivityIndicator, Text, StyleSheet } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import RootNavigator from './src/navigation/RootNavigator';
+import MainTabsNavigator from './src/navigation/MainTabsNavigator';
 
+/**
+ * AppContent – rendered inside AuthProvider so it can call useAuth().
+ *
+ * Flow:
+ *  loading  → splash
+ *  no user  → RootNavigator (Login → Signup → Onboarding → MainTabs-screen)
+ *  user     → MainTabsNavigator directly
+ *
+ * Note: during signup the auth state change fires immediately.
+ * SignupScreen navigates to BasicInfo *before* React re-renders, so
+ * the onboarding stack is only visible briefly. Once the questionnaire
+ * marks onboardingComplete:true the user already has MainTabs.
+ */
 function AppContent() {
-  const [activeTab, setActiveTab] = useState<'devices' | 'stim' | 'sensors'>('devices');
+  const { user, loading } = useAuth();
 
-  return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#6366f1" />
-      
-      {/* App Header */}
-      <View style={styles.appHeader}>
-        <Text style={styles.appTitle}>⚡ Smart Stim Controller</Text>
-        <Text style={styles.appSubtitle}>BLE Device Control</Text>
-      </View>
+  if (loading) {
+    return (
+      <LinearGradient colors={['#5DADE2', '#3b82f6']} style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#ffffff" />
+        <Text style={styles.loadingText}>Loading…</Text>
+      </LinearGradient>
+    );
+  }
 
-      {/* Tab Navigation */}
-      <View style={styles.tabBar}>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'devices' && styles.tabActive]}
-          onPress={() => setActiveTab('devices')}
-        >
-          <Text style={[styles.tabText, activeTab === 'devices' && styles.tabTextActive]}>
-            📡 Devices
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'stim' && styles.tabActive]}
-          onPress={() => setActiveTab('stim')}
-        >
-          <Text style={[styles.tabText, activeTab === 'stim' && styles.tabTextActive]}>
-            ⚡ Stim
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'sensors' && styles.tabActive]}
-          onPress={() => setActiveTab('sensors')}
-        >
-          <Text style={[styles.tabText, activeTab === 'sensors' && styles.tabTextActive]}>
-            🌊 Sensors
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Content */}
-      <View style={styles.content}>
-        {activeTab === 'devices' ? (
-          <DeviceScanner />
-        ) : activeTab === 'stim' ? (
-          <ComprehensiveStimPanel />
-        ) : (
-          <WristbandSensorsPanel />
-        )}
-      </View>
-    </SafeAreaView>
-  );
+  return user ? <MainTabsNavigator /> : <RootNavigator />;
 }
 
 export default function App() {
   return (
-    <BLEProvider>
-      <AppContent />
-    </BLEProvider>
+    <SafeAreaProvider>
+      <StatusBar style="auto" />
+      <AuthProvider>
+        <BLEProvider>
+          <NavigationContainer>
+            <AppContent />
+          </NavigationContainer>
+        </BLEProvider>
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  loadingContainer: {
     flex: 1,
-    backgroundColor: '#6366f1',
-  },
-  appHeader: {
-    backgroundColor: '#6366f1',
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  appTitle: {
-    color: '#ffffff',
-    fontSize: 26,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  appSubtitle: {
-    color: '#e0e7ff',
-    fontSize: 13,
-    marginTop: 4,
-    fontWeight: '500',
-  },
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: '#6366f1',
-    paddingHorizontal: 8,
-    paddingTop: 4,
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 14,
+    justifyContent: 'center',
     alignItems: 'center',
-    borderBottomWidth: 3,
-    borderBottomColor: 'transparent',
-    marginHorizontal: 4,
+    gap: 16,
   },
-  tabActive: {
-    borderBottomColor: '#ffffff',
-  },
-  tabText: {
-    color: '#c7d2fe',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  tabTextActive: {
+  loadingText: {
     color: '#ffffff',
-    fontWeight: '700',
-  },
-  content: {
-    flex: 1,
-    backgroundColor: '#f8fafc',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });

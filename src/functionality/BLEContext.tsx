@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { unstable_batchedUpdates } from 'react-native';
 import { Platform, PermissionsAndroid } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Device } from 'react-native-ble-plx';
 import { bleService, BLEDevice } from '../functionality/BLEService';
 import { 
   BLEProtocol, 
@@ -20,6 +22,7 @@ interface BLEContextType {
   isScanning: boolean;
   isConnected: boolean;
   discoveredDevices: BLEDevice[];
+  connectedDevice: Device | null;
   connectedDeviceName: string | null;
   receivedMessages: string[];
   statusMessage: string;
@@ -57,6 +60,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   const [isScanning, setIsScanning] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [discoveredDevices, setDiscoveredDevices] = useState<BLEDevice[]>([]);
+  const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [connectedDeviceName, setConnectedDeviceName] = useState<string | null>(null);
   const [receivedMessages, setReceivedMessages] = useState<string[]>([]);
   const [statusMessage, setStatusMessage] = useState('Ready');
@@ -92,22 +96,37 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     bleService.setDataCallback((data: string) => {
       const timestamp = new Date().toLocaleTimeString();
       const message = `[${timestamp}] RX: ${data}`;
-      setReceivedMessages((prev) => [...prev, message]);
+      // Keep last 2000 messages for the log monitor UI.
+      // NOTE: we intentionally trim from the BACK (keep newest) so that
+      // useSensorPipeline's absolute-index pointer is never invalidated.
+      // The pipeline processes new messages by comparing length, so any
+      // front-trim would cause it to miss all subsequent messages.
+      setReceivedMessages((prev) =>
+        prev.length >= 2000 ? [...prev.slice(-1999), message] : [...prev, message]
+      );
     });
 
     bleService.setConnectionCallback((connected: boolean, device) => {
-      setIsConnected(connected);
-      if (connected && device) {
-        setConnectedDeviceName(device.name || 'Unknown Device');
-        const protocol = bleService.getCurrentProtocol();
-        setCurrentProtocol(protocol);
-        setStatusMessage(`Connected to ${device.name || device.id} (${protocol.name})`);
-        // Save last connected device
-        saveLastDevice(device.id, device.name || 'Unknown Device');
-      } else {
-        setConnectedDeviceName(null);
-        setStatusMessage('Disconnected');
-      }
+      // Wrap ALL setState calls in unstable_batchedUpdates so that native BLE
+      // callbacks (which run outside React's event loop) produce ONE render
+      // instead of 4-5 separate renders — preventing the disconnect crash and
+      // reducing overall re-render pressure.
+      unstable_batchedUpdates(() => {
+        setIsConnected(connected);
+        if (connected && device) {
+          setConnectedDevice(bleService.getConnectedDevice());
+          setConnectedDeviceName(device.name || 'Unknown Device');
+          const protocol = bleService.getCurrentProtocol();
+          setCurrentProtocol(protocol);
+          setStatusMessage(`Connected to ${device.name || device.id} (${protocol.name})`);
+          // Save last connected device (async, no setState)
+          saveLastDevice(device.id, device.name || 'Unknown Device');
+        } else {
+          setConnectedDevice(null);
+          setConnectedDeviceName(null);
+          setStatusMessage('Disconnected');
+        }
+      });
     });
 
     bleService.setErrorCallback((error: string) => {
@@ -130,13 +149,11 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
           const granted = await PermissionsAndroid.requestMultiple([
             PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
             PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           ]);
 
           return (
             granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED &&
-            granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED &&
-            granted['android.permission.ACCESS_FINE_LOCATION'] === PermissionsAndroid.RESULTS.GRANTED
+            granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED
           );
         } else {
           // Android 11 and below
@@ -291,10 +308,19 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   };
 
   const disconnectDevice = async () => {
-    await bleService.disconnect();
-    setIsConnected(false);
-    setConnectedDeviceName(null);
-    setStatusMessage('Disconnected');
+    try {
+      await bleService.disconnect();
+      // State is updated via the connectionCallback registered above.
+      // DO NOT call setIsConnected/setConnectedDevice here — doing so fires
+      // a second React state update and can cause a render-loop crash on Android.
+    } catch (err: any) {
+      console.error('[BLEContext] Disconnect error:', err);
+      // Force state if callback somehow didn't fire
+      setIsConnected(false);
+      setConnectedDevice(null);
+      setConnectedDeviceName(null);
+      setStatusMessage('Disconnected');
+    }
   };
 
   const sendCommand = async (command: string) => {
@@ -303,9 +329,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
       return;
     }
 
-    // Send command as-is without adding newline (device firmware should handle it)
-    // Python GUI defaults to "None" for line ending
-    const dataToSend = command;
+    // ESP/NUS firmwares in this project parse line-based commands terminated by '\n'.
+    const dataToSend = command.endsWith('\n') ? command : `${command}\n`;
     
     console.log('[BLEContext] Sending command:', JSON.stringify(dataToSend));
     const success = await bleService.sendData(dataToSend, true); // true = with response (Python default)
@@ -356,6 +381,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     isScanning,
     isConnected,
     discoveredDevices,
+    connectedDevice,
     connectedDeviceName,
     receivedMessages,
     statusMessage,
