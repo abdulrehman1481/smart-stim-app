@@ -1,6 +1,7 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import HomeScreen from '../screens/main/HomeScreen';
 import PhysiologicalInsightScreen from '../screens/main/PhysiologicalInsightScreen';
@@ -19,6 +20,8 @@ export type MainTabsParamList = {
 const Tab = createBottomTabNavigator<MainTabsParamList>();
 
 export default function MainTabsNavigator() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -29,9 +32,10 @@ export default function MainTabsNavigator() {
           backgroundColor: '#ffffff',
           borderTopColor: '#e5e7eb',
           borderTopWidth: 1,
-          paddingBottom: 4,
+          // Keep tabs above Android 3-button navigation bar.
+          paddingBottom: Math.max(insets.bottom, 6),
           paddingTop: 4,
-          height: 60,
+          height: 56 + Math.max(insets.bottom, 6),
         },
         tabBarLabelStyle: {
           fontSize: 11,
