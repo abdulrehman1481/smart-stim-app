@@ -24,6 +24,7 @@ export type SensorReadingType =
   | 'ppg'
   | 'imu_gyro'
   | 'imu_accel'
+  | 'imu_combined'
   | 'eda';
 
 export interface TemperatureParsed {
@@ -65,12 +66,25 @@ export interface IMUAccelParsed {
   az_mg: number;
 }
 
+export interface IMUCombinedParsed {
+  type: 'imu_combined';
+  ax_mg: number;
+  ay_mg: number;
+  az_mg: number;
+  gx_mdps: number;
+  gy_mdps: number;
+  gz_mdps: number;
+  uptimeMs: number;
+}
+
 export interface EDAParsed {
   type: 'eda';
   uptimeMs: number;
   rawADC: number;
   /** ADS1113 converted voltage in milli-volts */
   mv: number;
+  /** Calibrated conductance in microsiemens, if emitted by firmware */
+  uS?: number;
   deltaRaw: number;
   flatCount: number;
 }
@@ -80,6 +94,7 @@ export type ParsedSensorReading =
   | PPGParsed
   | IMUGyroParsed
   | IMUAccelParsed
+  | IMUCombinedParsed
   | EDAParsed;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +139,23 @@ function extractMessage(line: string): string {
  * Expected message: `[AS6221] t=24.50 C | raw=2450 | uptime=1234 ms`
  */
 function parseTemperature(message: string): TemperatureParsed | null {
+  // New firmware exact format from as6221_task.c:
+  // [AS6221] t=24.50 C | uptime=1234 ms
+  const strict = message.match(/^\[AS6221\]\s+t=([\-\d.]+)\s+C\s*\|\s*uptime=(\d+)\s+ms$/);
+  if (strict) {
+    const tempC = parseFloat(strict[1]);
+    const uptimeMs = parseInt(strict[2], 10);
+    return {
+      type: 'temperature',
+      tempC,
+      // raw ADC is not emitted in this firmware string; keep deterministic fallback.
+      rawADC: Math.round(tempC * 100),
+      uptimeMs,
+    };
+  }
+
+  // Legacy format fallback:
+  // [AS6221] t=24.50 C | raw=2450 | uptime=1234 ms
   // Match temperature
   const tempMatch = message.match(/t=([\-\d.]+)\s*C/);
   const rawMatch  = message.match(/raw=(\d+)/);
@@ -145,6 +177,21 @@ function parseTemperature(message: string): TemperatureParsed | null {
  * Expected message: `PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | avail=4`
  */
 function parsePPG(message: string): PPGParsed | null {
+  // New firmware exact format from max30101_task.c:
+  // PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | t=1234
+  const strict = message.match(/^PPG\s+FIFO\s*\|\s*RED=(\d+)\s*\|\s*IR=(\d+)\s*\|\s*GREEN=(\d+)\s*\|\s*t=(\d+)$/);
+  if (strict) {
+    return {
+      type: 'ppg',
+      red: parseInt(strict[1], 10),
+      ir: parseInt(strict[2], 10),
+      green: parseInt(strict[3], 10),
+      available: 1,
+    };
+  }
+
+  // Legacy format fallback:
+  // PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | avail=4
   if (!message.includes('PPG FIFO')) return null;
 
   const redMatch   = message.match(/RED=(\d+)/);
@@ -160,6 +207,36 @@ function parsePPG(message: string): PPGParsed | null {
     ir:        parseInt(irMatch[1],    10),
     green:     parseInt(greenMatch[1], 10),
     available: availMatch ? parseInt(availMatch[1], 10) : 1,
+  };
+}
+
+/**
+ * Parse newer calibrated LSM6DSO combined log line.
+ *
+ * Expected message: `[LSM6DSO] A[g]=[0.012 -0.045 1.003] G[dps]=[0.21 -0.10 0.05] t=1234`
+ */
+function parseIMUCombined(message: string): IMUCombinedParsed | null {
+  // Exact format from lsm6dso_task.c:
+  // [LSM6DSO] A[g]=[0.012 -0.045 1.003] G[dps]=[0.21 -0.10 0.05] t=1234
+  const strict = message.match(/^\[LSM6DSO\]\s+A\[g\]=\[\s*([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s*\]\s+G\[dps\]=\[\s*([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s*\]\s+t=(\d+)$/);
+  if (!strict) return null;
+
+  const ax_g = parseFloat(strict[1]);
+  const ay_g = parseFloat(strict[2]);
+  const az_g = parseFloat(strict[3]);
+  const gx_dps = parseFloat(strict[4]);
+  const gy_dps = parseFloat(strict[5]);
+  const gz_dps = parseFloat(strict[6]);
+
+  return {
+    type: 'imu_combined',
+    ax_mg: Math.round(ax_g * 1000),
+    ay_mg: Math.round(ay_g * 1000),
+    az_mg: Math.round(az_g * 1000),
+    gx_mdps: Math.round(gx_dps * 1000),
+    gy_mdps: Math.round(gy_dps * 1000),
+    gz_mdps: Math.round(gz_dps * 1000),
+    uptimeMs: parseInt(strict[7], 10),
   };
 }
 
@@ -220,9 +297,27 @@ function parseIMUAccel(message: string): IMUAccelParsed | null {
  * Expected message: `t=1234ms raw=15000 mv=1875 dRaw=5 flat_cnt=0`
  */
 function parseEDA(message: string): EDAParsed | null {
+  // Exact format from ads1113_task.c:
+  // t=1234ms raw=15000 mv=1875.000 uS=12.345 dRaw=5 flat_cnt=0
+  // Optional trailing token when flatline triggers: " FLATLINE"
+  const strict = message.match(/^t=(\d+)ms\s+raw=([\-\d]+)\s+mv=([\-\d.]+)\s+uS=([\-\d.]+)\s+dRaw=([\-\d]+)\s+flat_cnt=(\d+)(?:\s+FLATLINE)?$/);
+  if (strict) {
+    return {
+      type: 'eda',
+      uptimeMs: parseInt(strict[1], 10),
+      rawADC: parseInt(strict[2], 10),
+      mv: parseFloat(strict[3]),
+      uS: parseFloat(strict[4]),
+      deltaRaw: parseInt(strict[5], 10),
+      flatCount: parseInt(strict[6], 10),
+    };
+  }
+
+  // Legacy fallback:
   const timeMatch  = message.match(/t=(\d+)ms/);
   const rawMatch   = message.match(/raw=([\-\d]+)/);
-  const mvMatch    = message.match(/mv=([\-\d]+)/);
+  const mvMatch    = message.match(/mv=([\-\d.]+)/);
+  const uSMatch    = message.match(/uS=([\-\d.]+)/);
   const deltaMatch = message.match(/dRaw=([\-\d]+)/);
   const flatMatch  = message.match(/flat_cnt=(\d+)/);
 
@@ -232,7 +327,8 @@ function parseEDA(message: string): EDAParsed | null {
     type:       'eda',
     uptimeMs:   timeMatch  ? parseInt(timeMatch[1],  10) : 0,
     rawADC:     parseInt(rawMatch[1],   10),
-    mv:         parseInt(mvMatch[1],    10),
+    mv:         parseFloat(mvMatch[1]),
+    uS:         uSMatch ? parseFloat(uSMatch[1]) : undefined,
     deltaRaw:   deltaMatch ? parseInt(deltaMatch[1], 10) : 0,
     flatCount:  flatMatch  ? parseInt(flatMatch[1],  10) : 0,
   };
@@ -262,6 +358,9 @@ export function parseSensorLine(line: string): ParsedSensorReading | null {
       return parsePPG(message);
 
     case 'lsm6dso_app':
+      if (message.includes('A[g]=') && message.includes('G[dps]=')) {
+        return parseIMUCombined(message);
+      }
       if (message.includes('G RAW')) return parseIMUGyro(message);
       if (message.includes('A RAW')) return parseIMUAccel(message);
       return null;

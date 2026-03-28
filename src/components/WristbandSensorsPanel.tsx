@@ -5,7 +5,6 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Switch,
   Dimensions,
   Alert,
 } from 'react-native';
@@ -18,7 +17,7 @@ import { useSensorPipeline } from '../hooks/useSensorPipeline';
 const WINDOW_SIZE = 100;
 const UPDATE_INTERVAL = 100; // 100ms = 10Hz sampling
 
-type SensorType = 'PPG_IR' | 'PPG_RED' | 'PPG_GREEN' | 'HR' | 'EDA' | 'GYRO_X' | 'GYRO_Y' | 'GYRO_Z' | 'ACC_X' | 'ACC_Y' | 'ACC_Z' | 'TEMP' | 'SCR';
+type SensorType = 'PPG_IR' | 'PPG_RED' | 'PPG_GREEN' | 'EDA' | 'GYRO_X' | 'GYRO_Y' | 'GYRO_Z' | 'ACC_X' | 'ACC_Y' | 'ACC_Z' | 'TEMP';
 
 interface SensorData {
   type: SensorType;
@@ -37,8 +36,15 @@ interface FilterConfig {
   cutoffHigh: number; // Hz
 }
 
+const sanitizeSensorValue = (value: number, min: number, max: number): number => {
+  if (!Number.isFinite(value)) return 0;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+};
+
 export const WristbandSensorsPanel: React.FC = () => {
-  const { isConnected, connectedDeviceName, receivedMessages } = useBLE();
+  const { isConnected, connectedDeviceName } = useBLE();
   const { user } = useAuth();
 
   // Live sensor data from the BLE→Parse→Firebase pipeline
@@ -60,16 +66,14 @@ export const WristbandSensorsPanel: React.FC = () => {
     PPG_IR: { type: 'PPG_IR', label: 'PPG-IR', value: 0, unit: '', color: '#ef4444', buffer: Array(WINDOW_SIZE).fill(0) },
     PPG_RED: { type: 'PPG_RED', label: 'PPG-Red', value: 0, unit: '', color: '#dc2626', buffer: Array(WINDOW_SIZE).fill(0) },
     PPG_GREEN: { type: 'PPG_GREEN', label: 'PPG-Green', value: 0, unit: '', color: '#10b981', buffer: Array(WINDOW_SIZE).fill(0) },
-    HR: { type: 'HR', label: 'Heart Rate', value: 0, unit: 'BPM', color: '#f97316', buffer: Array(WINDOW_SIZE).fill(0) },
     EDA: { type: 'EDA', label: 'EDA', value: 0, unit: 'µS', color: '#3b82f6', buffer: Array(WINDOW_SIZE).fill(0) },
-    GYRO_X: { type: 'GYRO_X', label: 'Gyro-X', value: 0, unit: '°/s', color: '#8b5cf6', buffer: Array(WINDOW_SIZE).fill(0) },
-    GYRO_Y: { type: 'GYRO_Y', label: 'Gyro-Y', value: 0, unit: '°/s', color: '#a855f7', buffer: Array(WINDOW_SIZE).fill(0) },
-    GYRO_Z: { type: 'GYRO_Z', label: 'Gyro-Z', value: 0, unit: '°/s', color: '#c084fc', buffer: Array(WINDOW_SIZE).fill(0) },
-    ACC_X: { type: 'ACC_X', label: 'Accel-X', value: 0, unit: 'g', color: '#06b6d4', buffer: Array(WINDOW_SIZE).fill(0) },
-    ACC_Y: { type: 'ACC_Y', label: 'Accel-Y', value: 0, unit: 'g', color: '#0891b2', buffer: Array(WINDOW_SIZE).fill(0) },
-    ACC_Z: { type: 'ACC_Z', label: 'Accel-Z', value: 0, unit: 'g', color: '#0e7490', buffer: Array(WINDOW_SIZE).fill(0) },
+    GYRO_X: { type: 'GYRO_X', label: 'Gyro-X', value: 0, unit: 'mdps', color: '#8b5cf6', buffer: Array(WINDOW_SIZE).fill(0) },
+    GYRO_Y: { type: 'GYRO_Y', label: 'Gyro-Y', value: 0, unit: 'mdps', color: '#a855f7', buffer: Array(WINDOW_SIZE).fill(0) },
+    GYRO_Z: { type: 'GYRO_Z', label: 'Gyro-Z', value: 0, unit: 'mdps', color: '#c084fc', buffer: Array(WINDOW_SIZE).fill(0) },
+    ACC_X: { type: 'ACC_X', label: 'Accel-X', value: 0, unit: 'mg', color: '#06b6d4', buffer: Array(WINDOW_SIZE).fill(0) },
+    ACC_Y: { type: 'ACC_Y', label: 'Accel-Y', value: 0, unit: 'mg', color: '#0891b2', buffer: Array(WINDOW_SIZE).fill(0) },
+    ACC_Z: { type: 'ACC_Z', label: 'Accel-Z', value: 0, unit: 'mg', color: '#0e7490', buffer: Array(WINDOW_SIZE).fill(0) },
     TEMP: { type: 'TEMP', label: 'Temperature', value: 0, unit: '°C', color: '#f59e0b', buffer: Array(WINDOW_SIZE).fill(0) },
-    SCR: { type: 'SCR', label: 'SCR', value: 0, unit: '', color: '#14b8a6', buffer: Array(WINDOW_SIZE).fill(0) },
   });
   
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -123,9 +127,6 @@ export const WristbandSensorsPanel: React.FC = () => {
     newSensors.PPG_RED.value = ppgBase * 0.8 + Math.random() * 15;
     newSensors.PPG_GREEN.value = ppgBase * 0.6 + Math.random() * 10;
     
-    // Heart Rate
-    newSensors.HR.value = heartRate + (Math.random() - 0.5) * 5;
-    
     // EDA (slowly varying)
     newSensors.EDA.value = 5 + 2 * Math.sin(0.1 * t) + Math.random() * 0.5;
     
@@ -142,10 +143,6 @@ export const WristbandSensorsPanel: React.FC = () => {
     // Temperature (slowly varying body temp)
     newSensors.TEMP.value = 36.5 + 0.3 * Math.sin(0.05 * t) + Math.random() * 0.1;
     
-    // SCR (skin conductance response - occasional spikes)
-    const spikeProb = Math.random();
-    newSensors.SCR.value = spikeProb > 0.95 ? 5 + Math.random() * 3 : 1 + Math.random() * 0.5;
-    
     // Update buffers
     Object.keys(newSensors).forEach((key) => {
       const sensorKey = key as SensorType;
@@ -161,8 +158,8 @@ export const WristbandSensorsPanel: React.FC = () => {
       firebaseLogCounterRef.current++;
       if (firebaseLogCounterRef.current >= FIREBASE_LOG_INTERVAL) {
         firebaseLogCounterRef.current = 0;
-        // Log key sensors (HR, TEMP, EDA) to Firebase
-        (['HR', 'TEMP', 'EDA'] as SensorType[]).forEach(sensorType => {
+        // Log key sensors to Firebase
+        (['TEMP', 'EDA'] as SensorType[]).forEach(sensorType => {
           const sensor = newSensors[sensorType];
           saveSensorReading(user.uid, {
             sensorType,
@@ -185,7 +182,7 @@ export const WristbandSensorsPanel: React.FC = () => {
 
       // Temperature (AS6221)
       if (live.temperature.lastUpdated) {
-        const temp = live.temperature.tempC;
+        const temp = sanitizeSensorValue(live.temperature.tempC, -40, 125);
         updated.TEMP = {
           ...updated.TEMP,
           value: temp,
@@ -193,33 +190,39 @@ export const WristbandSensorsPanel: React.FC = () => {
         };
       }
 
-      // PPG (MAX30101) — normalise to thousands for display
+      // PPG (MAX30101)
       if (live.ppg.lastUpdated) {
-        const irNorm  = live.ppg.ir    / 1000;
-        const redNorm = live.ppg.red   / 1000;
-        const grnNorm = live.ppg.green / 1000;
-        updated.PPG_IR    = { ...updated.PPG_IR,    value: irNorm,  buffer: [...updated.PPG_IR.buffer.slice(1),    irNorm]  };
-        updated.PPG_RED   = { ...updated.PPG_RED,   value: redNorm, buffer: [...updated.PPG_RED.buffer.slice(1),   redNorm] };
-        updated.PPG_GREEN = { ...updated.PPG_GREEN, value: grnNorm, buffer: [...updated.PPG_GREEN.buffer.slice(1), grnNorm] };
+        const ir = sanitizeSensorValue(live.ppg.ir, 0, 400000);
+        const red = sanitizeSensorValue(live.ppg.red, 0, 400000);
+        const green = sanitizeSensorValue(live.ppg.green, 0, 400000);
+        updated.PPG_IR = { ...updated.PPG_IR, value: ir, buffer: [...updated.PPG_IR.buffer.slice(1), ir] };
+        updated.PPG_RED = { ...updated.PPG_RED, value: red, buffer: [...updated.PPG_RED.buffer.slice(1), red] };
+        updated.PPG_GREEN = { ...updated.PPG_GREEN, value: green, buffer: [...updated.PPG_GREEN.buffer.slice(1), green] };
       }
 
       // Accelerometer (LSM6DSO) — in mg
       if (live.accel.lastUpdated) {
-        updated.ACC_X = { ...updated.ACC_X, value: live.accel.x, buffer: [...updated.ACC_X.buffer.slice(1), live.accel.x] };
-        updated.ACC_Y = { ...updated.ACC_Y, value: live.accel.y, buffer: [...updated.ACC_Y.buffer.slice(1), live.accel.y] };
-        updated.ACC_Z = { ...updated.ACC_Z, value: live.accel.z, buffer: [...updated.ACC_Z.buffer.slice(1), live.accel.z] };
+        const ax = sanitizeSensorValue(live.accel.x, -16000, 16000);
+        const ay = sanitizeSensorValue(live.accel.y, -16000, 16000);
+        const az = sanitizeSensorValue(live.accel.z, -16000, 16000);
+        updated.ACC_X = { ...updated.ACC_X, value: ax, buffer: [...updated.ACC_X.buffer.slice(1), ax] };
+        updated.ACC_Y = { ...updated.ACC_Y, value: ay, buffer: [...updated.ACC_Y.buffer.slice(1), ay] };
+        updated.ACC_Z = { ...updated.ACC_Z, value: az, buffer: [...updated.ACC_Z.buffer.slice(1), az] };
       }
 
       // Gyroscope (LSM6DSO) — in mdps
       if (live.gyro.lastUpdated) {
-        updated.GYRO_X = { ...updated.GYRO_X, value: live.gyro.x, buffer: [...updated.GYRO_X.buffer.slice(1), live.gyro.x] };
-        updated.GYRO_Y = { ...updated.GYRO_Y, value: live.gyro.y, buffer: [...updated.GYRO_Y.buffer.slice(1), live.gyro.y] };
-        updated.GYRO_Z = { ...updated.GYRO_Z, value: live.gyro.z, buffer: [...updated.GYRO_Z.buffer.slice(1), live.gyro.z] };
+        const gx = sanitizeSensorValue(live.gyro.x, -300000, 300000);
+        const gy = sanitizeSensorValue(live.gyro.y, -300000, 300000);
+        const gz = sanitizeSensorValue(live.gyro.z, -300000, 300000);
+        updated.GYRO_X = { ...updated.GYRO_X, value: gx, buffer: [...updated.GYRO_X.buffer.slice(1), gx] };
+        updated.GYRO_Y = { ...updated.GYRO_Y, value: gy, buffer: [...updated.GYRO_Y.buffer.slice(1), gy] };
+        updated.GYRO_Z = { ...updated.GYRO_Z, value: gz, buffer: [...updated.GYRO_Z.buffer.slice(1), gz] };
       }
 
       // EDA (ADS1113)
       if (live.eda.lastUpdated) {
-        const cond = live.eda.conductance_uS;
+        const cond = sanitizeSensorValue(live.eda.conductance_uS, 0, 200);
         updated.EDA = { ...updated.EDA, value: cond, buffer: [...updated.EDA.buffer.slice(1), cond] };
       }
 
@@ -353,7 +356,7 @@ export const WristbandSensorsPanel: React.FC = () => {
   // Group sensors by category
   const ppgSensors: SensorType[] = ['PPG_IR', 'PPG_RED', 'PPG_GREEN'];
   const imuSensors: SensorType[] = ['GYRO_X', 'GYRO_Y', 'GYRO_Z', 'ACC_X', 'ACC_Y', 'ACC_Z'];
-  const bioSensors: SensorType[] = ['HR', 'EDA', 'TEMP', 'SCR'];
+  const bioSensors: SensorType[] = ['EDA', 'TEMP'];
 
   const renderSensorGrid = (sensorTypes: SensorType[], title: string) => (
     <View style={styles.sensorGroup}>
@@ -791,7 +794,6 @@ export const WristbandSensorsPanel: React.FC = () => {
         <Text style={styles.infoText}>
           • PPG: Photoplethysmography for heart rate{'\n'}
           • EDA: Electrodermal Activity (skin conductance){'\n'}
-          • SCR: Skin Conductance Response{'\n'}
           • IMU: 9-axis motion tracking (gyro + accelerometer){'\n'}
           • Sampling Rate: {1000/UPDATE_INTERVAL} Hz{'\n'}
           • Window: {WINDOW_SIZE} samples (~{(WINDOW_SIZE * UPDATE_INTERVAL / 1000).toFixed(1)}s)

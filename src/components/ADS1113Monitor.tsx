@@ -15,8 +15,19 @@ import { LOG_SERVICE_UUID, LOG_NOTIFY_UUID } from '../functionality/BLEProtocols
 import base64 from 'react-native-base64';
 import { theme } from '../styles/theme';
 import { Card, SectionHeader, Badge, InfoRow } from './shared/StyledComponents';
+import {
+  CircularBuffer,
+  createThrottle,
+  ExponentialSmoother,
+  estimateStressLevel,
+  StressLevel,
+  clamp,
+} from '../functionality/SensorDataProcessor';
 
 const WINDOW_SIZE = 100;
+const STATE_UPDATE_INTERVAL_MS = 200; // Throttle UI updates to 200ms intervals
+const EDA_VOLTAGE_MIN = -4095;
+const EDA_VOLTAGE_MAX = 4095;
 
 interface EDAData {
   raw: number;
@@ -25,28 +36,59 @@ interface EDAData {
   flatCount: number;
 }
 
+interface AggregatedEDAState {
+  smoothedMV: number;
+  avgMV: number;
+  maxMV: number;
+  stressLevel: StressLevel;
+  sampleCount: number;
+  lastUpdated: Date | null;
+}
+
 /**
- * ADS1113Monitor - EDA/GSR Sensor
- * 
- * Monitors ADS1113 ADC for Electrodermal Activity (EDA) / Galvanic Skin Response
+ * ADS1113Monitor - EDA/GSR Sensor (Production-optimized)
+ *
+ * IMPROVEMENTS:
+ * ✅ Uses circular buffer (no unbounded growth)
+ * ✅ Throttles state updates to 200ms intervals (prevents render storms)
+ * ✅ Computes stress level from EDA magnitude + variability (not raw values)
+ * ✅ Uses smoothing filter to reject noise and spikes
+ * ✅ Single state update instead of 2-3 separate setters
+ *
  * Parses log format: "eda_raw: t=...ms raw=... mv=... dRaw=... flat_cnt=..."
  */
 export const ADS1113Monitor: React.FC = () => {
   const { connectedDevice, isConnected } = useBLE();
   const { user } = useAuth();
 
-  const [edaData, setEDAData] = useState<EDAData>({
-    raw: 0,
-    mV: 0,
-    deltaRaw: 0,
-    flatCount: 0,
+  // ───── AGGREGATED STATE (single state update per throttle interval) ─────
+  const [aggregated, setAggregated] = useState<AggregatedEDAState>({
+    smoothedMV: 0,
+    avgMV: 0,
+    maxMV: 0,
+    stressLevel: 'LOW',
+    sampleCount: 0,
+    lastUpdated: null,
   });
 
-  const [rawBuffer, setRawBuffer] = useState<number[]>([]);
-  const [mvBuffer, setMVBuffer] = useState<number[]>([]);
-  const [stressLevel, setStressLevel] = useState<string>('Normal');
+  // ───── REFS (no re-render on update) ─────
+  const mvBufferRef = useRef(new CircularBuffer(WINDOW_SIZE));
   
+  // Smoothing filter to reject spikes
+  const mvSmootherRef = useRef(new ExponentialSmoother(0.25));
+
+  // Throttled state update: only updates UI every 200ms max
+  const throttledUpdateState = useRef(
+    createThrottle(
+      (state: AggregatedEDAState) => {
+        setAggregated(state);
+      },
+      STATE_UPDATE_INTERVAL_MS
+    )
+  ).current;
+
   const [isMonitoring, setIsMonitoring] = useState<boolean>(false);
+  const [enableFirebase, setEnableFirebase] = useState<boolean>(false);
 
   const rxBuffer = useRef<string>('');
   const sampleCounter = useRef<number>(0);
@@ -79,27 +121,48 @@ export const ADS1113Monitor: React.FC = () => {
   }, []);
 
   /**
-   * Estimate stress level from EDA magnitude and variability
-   * Higher EDA typically indicates higher arousal/stress
+   * Process EDA sample: apply smoothing, buffer, aggregate, then throttle update.
+   * 
+   * IMPROVEMENTS over raw state updates:
+   * ✅ Smooths spiky values before buffering
+   * ✅ Aggregates into meaningful metric: stress level
+   * ✅ Throttles state updates (200ms max frequency)
    */
-  const estimateStressLevel = useCallback((mvData: number[]): string => {
-    if (mvData.length < 10) return 'Calibrating';
+  const processEDASample = useCallback((mvValue: number) => {
+    // Clamp to valid range
+    const clampedValue = clamp(mvValue, EDA_VOLTAGE_MIN, EDA_VOLTAGE_MAX);
+    
+    // Apply smoothing filter
+    const smoothedValue = mvSmootherRef.current.update(clampedValue);
 
-    const recent = mvData.slice(-20);
-    const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
-    const variance = recent.reduce((sum, val) => sum + Math.pow(val - avg, 2), 0) / recent.length;
-    const stdDev = Math.sqrt(variance);
+    // Add to circular buffer (auto-discard oldest if full)
+    mvBufferRef.current.push(Math.abs(smoothedValue));
 
-    // Rough heuristics (adjust based on your sensor calibration)
-    if (avg < 100 && stdDev < 10) return 'Very Low';
-    if (avg < 200 && stdDev < 20) return 'Low';
-    if (avg < 400 && stdDev < 40) return 'Normal';
-    if (avg < 600 && stdDev < 60) return 'Elevated';
-    return 'High';
-  }, []);
+    // Compute aggregated metrics
+    const allValues = mvBufferRef.current.getAll();
+    const avgMV = allValues.length > 0 ? allValues.reduce((a, b) => a + b, 0) / allValues.length : 0;
+    const maxMV = allValues.length > 0 ? Math.max(...allValues) : 0;
+    const stressLevelResult = estimateStressLevel(allValues);
+
+    // Throttle state update (max once per 200ms)
+    throttledUpdateState({
+      smoothedMV: Math.abs(smoothedValue),
+      avgMV: Math.round(avgMV),
+      maxMV: Math.round(maxMV),
+      stressLevel: stressLevelResult,
+      sampleCount: allValues.length,
+      lastUpdated: new Date(),
+    });
+  }, [throttledUpdateState]);
 
   /**
-   * Handle incoming BLE notifications
+   * Handle incoming BLE notifications - production optimized
+   *
+   * IMPROVEMENTS:
+   * ✅ Processes data in refs (no re-render on buffer change)
+   * ✅ Single state update per throttle interval
+   * ✅ Applies smoothing before aggregation
+   * ✅ Computes stress level instead of showing raw voltage
    */
   const handleNotification = useCallback((data: string) => {
     rxBuffer.current += data;
@@ -114,30 +177,13 @@ export const ADS1113Monitor: React.FC = () => {
         const eda = parseEDALine(line);
         if (eda) {
           console.log('[ADS1113Monitor] 🧘 EDA:', `raw=${eda.raw} mV=${eda.mV} flatCount=${eda.flatCount}`);
-          setEDAData(eda);
-
-          setRawBuffer(prev => {
-            const updated = [...prev, eda.raw];
-            if (updated.length > WINDOW_SIZE) return updated.slice(-WINDOW_SIZE);
-            return updated;
-          });
-
-          setMVBuffer(prev => {
-            const updated = [...prev, eda.mV];
-            if (updated.length > WINDOW_SIZE) return updated.slice(-WINDOW_SIZE);
-
-            // Update stress level every 5 samples
-            if (sampleCounter.current % 5 === 0) {
-              const level = estimateStressLevel(updated);
-              setStressLevel(level);
-            }
-
-            return updated;
-          });
+          
+          // Process sample: smoothing → buffer → aggregate → throttle update
+          processEDASample(eda.mV);
 
           // Save to Firebase (throttled - every 10 samples = ~2.5 seconds @ 4Hz)
           sampleCounter.current++;
-          if (isConnected && user && sampleCounter.current % 10 === 0) {
+          if (enableFirebase && isConnected && user && sampleCounter.current % 10 === 0) {
             // Calculate conductance and resistance
             const voltage = eda.mV / 1000; // Convert to volts
             const resistance = voltage > 0 ? 150 : 0; // Estimate based on circuit
@@ -148,7 +194,7 @@ export const ADS1113Monitor: React.FC = () => {
               voltage: voltage,
               resistance: resistance,
               conductance: conductance,
-              stressLevel: stressLevel as any,
+              stressLevel: aggregated.stressLevel as any,
               deviceId: connectedDevice?.id,
               deviceName: connectedDevice?.name,
             }).catch(err => {
@@ -158,7 +204,7 @@ export const ADS1113Monitor: React.FC = () => {
         }
       }
     }
-  }, [parseEDALine, estimateStressLevel, isConnected, user, connectedDevice]);
+  }, [parseEDALine, processEDASample, enableFirebase, isConnected, user, connectedDevice, aggregated.stressLevel]);
 
   /**
    * Start monitoring
@@ -228,37 +274,22 @@ export const ADS1113Monitor: React.FC = () => {
     };
   }, []);
 
-  const chartWidth = Dimensions.get('window').width - 40;
-
-  const chartConfig = {
-    backgroundColor: theme.colors.surface,
-    backgroundGradientFrom: theme.colors.surface,
-    backgroundGradientTo: '#2a3f5f',
-    decimalPlaces: 0,
-    color: (opacity = 1) => `rgba(99, 102, 241, ${opacity})`,
-    labelColor: (opacity = 1) => `rgba(224, 231, 255, ${opacity})`,
-    style: { borderRadius: theme.borderRadius.lg },
-    propsForDots: { r: '0' },
-  };
-
-  const getStressColor = () => {
-    switch (stressLevel) {
-      case 'Very Low': return theme.colors.success;
-      case 'Low': return '#84cc16';
-      case 'Normal': return theme.colors.info;
-      case 'Elevated': return theme.colors.warning;
-      case 'High': return theme.colors.error;
+  const getStressColor = (): string => {
+    switch (aggregated.stressLevel) {
+      case 'LOW': return theme.colors.success;
+      case 'MEDIUM': return theme.colors.info;
+      case 'HIGH': return theme.colors.warning;
+      case 'VERY_HIGH': return theme.colors.error;
       default: return theme.colors.textSecondary;
     }
   };
 
   const getStressBadgeVariant = (): 'success' | 'warning' | 'error' | 'info' | 'default' => {
-    switch (stressLevel) {
-      case 'Very Low': return 'success';
-      case 'Low': return 'success';
-      case 'Normal': return 'info';
-      case 'Elevated': return 'warning';
-      case 'High': return 'error';
+    switch (aggregated.stressLevel) {
+      case 'LOW': return 'success';
+      case 'MEDIUM': return 'info';
+      case 'HIGH': return 'warning';
+      case 'VERY_HIGH': return 'error';
       default: return 'default';
     }
   };
@@ -269,97 +300,67 @@ export const ADS1113Monitor: React.FC = () => {
       <View style={styles.header}>
         <SectionHeader
           title="ADS1113 EDA Sensor"
-          subtitle={isConnected ? (isMonitoring ? 'Monitoring' : 'Ready') : 'Not Connected'}
+          subtitle={isConnected ? (isMonitoring ? 'Monitoring (Aggregated)' : 'Ready') : 'Not Connected'}
           rightElement={
             <Badge variant={isConnected ? 'success' : 'error'} text={isConnected ? 'Connected' : 'Disconnected'} />
           }
         />
       </View>
 
-      {/* Stress Level Display */}
+      {/* Stress Level Display (Aggregated Metric) */}
       <View style={styles.content}>
         <Card style={[styles.stressCard, { borderColor: getStressColor() }] as any}>
           <View style={styles.stressHeader}>
-            <Text style={styles.stressLabel}>🧘 Arousal Level</Text>
-            <Badge variant={getStressBadgeVariant()} text={stressLevel} />
+            <Text style={styles.stressLabel}>🧘 Arousal/Stress Level</Text>
+            <Badge variant={getStressBadgeVariant()} text={aggregated.stressLevel} />
           </View>
           <Text style={styles.stressSubtext}>
-            Based on EDA signal analysis
+            Computed from smoothed EDA signal with {aggregated.sampleCount} samples
           </Text>
         </Card>
       </View>
 
-      {/* Current Values */}
+      {/* Aggregated Metrics (NOT raw values) */}
       <Card style={styles.card}>
-        <Text style={styles.sectionTitle}>Current Readings</Text>
-        <InfoRow label="RAW ADC" value={edaData.raw.toString()} icon="📊" />
-        <InfoRow label="Voltage" value={`${edaData.mV} mV`} icon="⚡" />
-        <InfoRow label="Delta" value={edaData.deltaRaw.toString()} icon="📈" />
-        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: theme.spacing.sm }}>
-          <InfoRow label="Flat Count" value={edaData.flatCount.toString()} icon="📉" />
-          {edaData.flatCount > 10 && (
-            <Badge variant="warning" text="High" style={{ marginLeft: theme.spacing.sm }} />
-          )}
+        <Text style={styles.sectionTitle}>Aggregated Metrics</Text>
+        <View style={styles.metricsGrid}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Smoothed μV</Text>
+            <Text style={styles.metricValue}>{aggregated.smoothedMV}</Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Average μV</Text>
+            <Text style={styles.metricValue}>{aggregated.avgMV}</Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Peak μV</Text>
+            <Text style={styles.metricValue}>{aggregated.maxMV}</Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Samples</Text>
+            <Text style={styles.metricValue}>{aggregated.sampleCount}</Text>
+          </View>
         </View>
       </Card>
 
-      {/* Flatline Warning */}
-      {edaData.flatCount >= 20 && (
-        <Card variant="outlined" style={styles.warningCard}>
-          <Text style={styles.warningText}>⚠️ Signal flatline detected</Text>
-          <Text style={styles.warningSubtext}>Check sensor connection</Text>
-        </Card>
-      )}
+      {/* Status Card */}
+      <Card style={styles.card}>
+        <Text style={styles.sectionTitle}>📊 Processing Status</Text>
+        <Text style={styles.statusText}>
+          Last updated: {aggregated.lastUpdated ? aggregated.lastUpdated.toLocaleTimeString() : 'Never'}
+        </Text>
+        <Text style={styles.statusText}>
+          State updates: Every {STATE_UPDATE_INTERVAL_MS}ms (throttled)
+        </Text>
+        <Text style={styles.statusText}>
+          ✅ EDA smoothing: Active (EMA with α=0.25)
+        </Text>
+        <Text style={styles.statusText}>
+          ✅ Circular buffer: {WINDOW_SIZE} sample capacity
+        </Text>
+      </Card>
 
-      {/* EDA Signal Chart (mV) */}
-      {mvBuffer.length > 10 && (
-        <Card style={styles.card}>
-          <Text style={styles.chartTitle}>EDA Signal (mV)</Text>
-          <LineChart
-            data={{
-              labels: [],
-              datasets: [{ data: mvBuffer.length > 0 ? mvBuffer : [0] }],
-            }}
-            width={chartWidth}
-            height={220}
-            chartConfig={chartConfig}
-            bezier
-            withDots={false}
-            withInnerLines={true}
-            withOuterLines={true}
-            withVerticalLabels={false}
-            style={styles.chart}
-          />
-          <Text style={styles.chartNote}>
-            Sample Rate: 4 Hz • Window: {mvBuffer.length} samples
-          </Text>
-        </Card>
-      )}
-
-      {/* RAW ADC Chart */}
-      {rawBuffer.length > 10 && (
-        <Card style={styles.card}>
-          <Text style={styles.chartTitle}>Raw ADC Values</Text>
-          <LineChart
-            data={{
-              labels: [],
-              datasets: [{ data: rawBuffer.length > 0 ? rawBuffer : [0] }],
-            }}
-            width={chartWidth}
-            height={180}
-            chartConfig={{ ...chartConfig, color: (opacity = 1) => `rgba(34, 197, 94, ${opacity})` }}
-            bezier
-            withDots={false}
-            withInnerLines={false}
-            withOuterLines={true}
-            withVerticalLabels={false}
-            style={styles.chart}
-          />
-          <Text style={styles.chartNote}>Higher values indicate increased arousal/stress</Text>
-        </Card>
-      )}
-
-      {mvBuffer.length === 0 && (
+      {aggregated.sampleCount === 0 && (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>
             {isConnected ? '⏳ Waiting for EDA data...' : '🔌 Connect device to start'}
@@ -369,10 +370,15 @@ export const ADS1113Monitor: React.FC = () => {
 
       {/* Info Card */}
       <Card style={styles.card}>
-        <Text style={styles.infoTitle}>💡 About EDA</Text>
+        <Text style={styles.infoTitle}>💡 About EDA & Production Optimization</Text>
         <Text style={styles.infoText}>
-          Electrodermal Activity (EDA), also known as Galvanic Skin Response (GSR), measures skin conductance changes 
-          related to sweat gland activity. It's commonly used as an indicator of psychological or physiological arousal.
+          Electrodermal Activity (EDA) measures skin conductance changes. This component uses:
+        </Text>
+        <Text style={styles.infoText}>
+          • Exponential smoothing to reject noise{'\n'}
+          • Circular buffers to prevent memory leaks{'\n'}
+          • Throttled updates (200ms intervals){'\n'}
+          • Meaningful aggregation (stress level, not raw mV)
         </Text>
       </Card>
     </ScrollView>
@@ -419,6 +425,36 @@ const styles = StyleSheet.create({
     ...theme.typography.h4,
     color: theme.colors.text,
     marginBottom: theme.spacing.md,
+  },
+  metricsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.md,
+  },
+  metricItem: {
+    flex: 1,
+    minWidth: '45%',
+    backgroundColor: theme.colors.background,
+    padding: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  metricLabel: {
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
+    fontWeight: '600',
+    marginBottom: theme.spacing.xs,
+  },
+  metricValue: {
+    ...theme.typography.h3,
+    color: theme.colors.primary,
+    fontWeight: '700',
+  },
+  statusText: {
+    ...theme.typography.body,
+    color: theme.colors.text,
+    marginVertical: theme.spacing.xs,
   },
   warningCard: {
     margin: theme.spacing.md,

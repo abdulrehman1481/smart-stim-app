@@ -97,56 +97,8 @@ export default function PsychologicalInsightScreen() {
     }, [user])
   );
 
-  const allCompleted = questionnaires.every((q) => q.status === 'completed');
-
-  const psychologicalStatusData = [
-    { label: 'Anxiety', value: 450, color: '#3b82f6' },
-    { label: 'Stress', value: 400, color: '#ec4899' },
-    { label: 'Depression', value: 580, color: '#3b82f6' },
-    { label: 'Sleep', value: 500, color: '#ec4899' },
-  ];
-
-  const stressInsightData = [
-    { hour: 0, value: 30 },
-    { hour: 4, value: 20 },
-    { hour: 8, value: 60 },
-    { hour: 12, value: 80 },
-    { hour: 16, value: 90 },
-    { hour: 20, value: 70 },
-  ];
-
-  const stressMetrics = [
-    { label: 'Responsiveness', value: 24, max: 30, color: '#ec4899' },
-    { label: 'Exertion balance', value: 32, max: 40, color: '#f59e0b' },
-    { label: 'Sleep patterns', value: 21, max: 30, color: '#3b82f6' },
-  ];
-
-  const insights = [
-    {
-      id: 1,
-      title: 'Stress Level',
-      value: 'Low',
-      icon: 'fitness',
-      color: '#10b981',
-      description: 'Your stress levels have decreased by 15% this week.',
-    },
-    {
-      id: 2,
-      title: 'Sleep Quality',
-      value: 'Good',
-      icon: 'moon',
-      color: '#5DADE2',
-      description: 'Average sleep duration: 7.5 hours.',
-    },
-    {
-      id: 3,
-      title: 'Mood Stability',
-      value: 'Stable',
-      icon: 'happy',
-      color: '#f59e0b',
-      description: 'Mood has been consistent throughout the week.',
-    },
-  ];
+  const completedCount = questionnaires.filter((q) => q.status === 'completed').length;
+  const dueNowCount = questionnaires.filter((q) => q.dueForFollowUp).length;
 
   const handleQuestionnairePress = (id: string) => {
     const questionnaire = questionnaires.find((q) => q.id === id);
@@ -255,162 +207,21 @@ export default function PsychologicalInsightScreen() {
           </View>
         </View>
 
-        {/* Note 2 */}
-        <View style={styles.noteCard}>
-          <Text style={styles.noteTitle}>
-            2. Psychological Status will be prepared once the above questionnaires are answered.
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Completion Summary</Text>
+          <View style={styles.statusSummaryCard}>
+            <View style={styles.statusSummaryRow}>
+              <Text style={styles.statusSummaryLabel}>Completed</Text>
+              <Text style={styles.statusSummaryValue}>{completedCount}/{questionnaires.length}</Text>
+            </View>
+            <View style={styles.statusSummaryRow}>
+              <Text style={styles.statusSummaryLabel}>Follow-up Due</Text>
+              <Text style={styles.statusSummaryValue}>{dueNowCount}</Text>
+            </View>
+          </View>
+          <Text style={styles.noteText}>
+            Only functional features are shown here right now: questionnaire entry, completion tracking, and history timeline.
           </Text>
-        </View>
-
-        {/* Psychological Status Section */}
-        {allCompleted ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Psychological Status</Text>
-            <View style={styles.statusCard}>
-              <View style={styles.barChart}>
-                {psychologicalStatusData.map((item, index) => (
-                  <View key={index} style={styles.barGroup}>
-                    <View style={styles.barPair}>
-                      <View
-                        style={[
-                          styles.chartBar,
-                          { height: (item.value / 600) * 150, backgroundColor: item.color },
-                        ]}
-                      />
-                      <View style={styles.barValueLabel}>
-                        <Text style={styles.barValue}>{item.value}</Text>
-                      </View>
-                    </View>
-                    <Text style={styles.barLabel}>{item.label}</Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.lockedSection}>
-            <Ionicons name="lock-closed" size={32} color="#cbd5e1" />
-            <Text style={styles.lockedText}>
-              Complete all questionnaires to view Psychological Status
-            </Text>
-          </View>
-        )}
-
-        {/* Note 3 */}
-        <View style={styles.noteCard}>
-          <Text style={styles.noteTitle}>
-            3. The Stress Daily Insight is Calculated based on the Physiological and Psychological Measures
-          </Text>
-        </View>
-
-        {/* Stress Daily Insight Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Stress Daily Insight</Text>
-
-          {/* Daily Timeline */}
-          <View style={styles.timelineCard}>
-            <Text style={styles.timelineTitle}>Daily Timeline</Text>
-            <View style={styles.timelineChart}>
-              {stressInsightData.map((point, index) => (
-                <View key={index} style={styles.timelineBarContainer}>
-                  <View
-                    style={[
-                      styles.timelineBar,
-                      {
-                        height: `${point.value}%`,
-                        backgroundColor: point.value > 70 ? '#f59e0b' : '#3b82f6',
-                      },
-                    ]}
-                  />
-                </View>
-              ))}
-            </View>
-            <View style={styles.timelineLabels}>
-              {['00', '06', '12', '18', '24'].map((label) => (
-                <Text key={label} style={styles.timelineLabel}>{label}</Text>
-              ))}
-            </View>
-            <View style={styles.timelineLegend}>
-              {[
-                { color: '#3b82f6', label: 'Stress' },
-                { color: '#f59e0b', label: 'Anger' },
-                { color: '#ec4899', label: 'Active' },
-                { color: '#cbd5e1', label: 'Unimeasurable' },
-              ].map((item) => (
-                <View key={item.label} style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: item.color }]} />
-                  <Text style={styles.legendText}>{item.label}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-
-          {/* Stress Score */}
-          <View style={styles.stressScoreCard}>
-            <View style={styles.scoreCircle}>
-              <Text style={styles.scoreValue}>77</Text>
-            </View>
-            <View style={styles.metricsContainer}>
-              {stressMetrics.map((metric, index) => (
-                <View key={index} style={styles.metricRow}>
-                  <View style={styles.metricLabelRow}>
-                    <View style={[styles.metricDot, { backgroundColor: metric.color }]} />
-                    <Text style={styles.metricLabel}>{metric.label}</Text>
-                  </View>
-                  <Text style={styles.metricValue}>
-                    {metric.value}/{metric.max}
-                  </Text>
-                  <View style={styles.metricBar}>
-                    <View
-                      style={[
-                        styles.metricBarFill,
-                        {
-                          width: `${(metric.value / metric.max) * 100}%`,
-                          backgroundColor: metric.color,
-                        },
-                      ]}
-                    />
-                  </View>
-                </View>
-              ))}
-            </View>
-          </View>
-        </View>
-
-        {/* Key Insights Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Key Insights</Text>
-          {insights.map((insight) => (
-            <View key={insight.id} style={styles.insightCard}>
-              <View style={[styles.insightIcon, { backgroundColor: `${insight.color}20` }]}>
-                <Ionicons name={insight.icon as any} size={24} color={insight.color} />
-              </View>
-              <View style={styles.insightContent}>
-                <View style={styles.insightHeader}>
-                  <Text style={styles.insightTitle}>{insight.title}</Text>
-                  <Text style={[styles.insightValue, { color: insight.color }]}>{insight.value}</Text>
-                </View>
-                <Text style={styles.insightDescription}>{insight.description}</Text>
-              </View>
-            </View>
-          ))}
-        </View>
-
-        {/* Daily Journal */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Daily Journal</Text>
-            <TouchableOpacity>
-              <Ionicons name="add-circle" size={24} color="#5DADE2" />
-            </TouchableOpacity>
-          </View>
-          <TouchableOpacity style={styles.journalCard}>
-            <View style={styles.journalHeader}>
-              <Text style={styles.journalDate}>Today</Text>
-              <Ionicons name="create-outline" size={20} color="#64748b" />
-            </View>
-            <Text style={styles.journalPrompt}>How are you feeling today?</Text>
-          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -469,8 +280,22 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  lockedSection: { padding: 40, alignItems: 'center', gap: 12 },
-  lockedText: { fontSize: 14, color: '#94a3b8', textAlign: 'center' },
+  statusSummaryCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+    marginBottom: 10,
+  },
+  statusSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  statusSummaryLabel: { fontSize: 14, color: '#334155', fontWeight: '600' },
+  statusSummaryValue: { fontSize: 15, color: '#0f172a', fontWeight: '700' },
   lastLevelText: { fontSize: 10, color: '#047857', marginTop: 2, textAlign: 'center', fontStyle: 'italic' },
   lastCompletedText: { fontSize: 10, color: '#065f46', marginTop: 2, textAlign: 'center' },
   followUpDueText: { color: '#b45309', fontWeight: '700' },
@@ -487,74 +312,4 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   historyButtonText: { fontSize: 11, color: '#ffffff', fontWeight: '600' },
-  statusCard: { backgroundColor: '#1e293b', padding: 24, borderRadius: 12 },
-  barChart: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'flex-end', height: 200 },
-  barGroup: { alignItems: 'center', gap: 8 },
-  barPair: { alignItems: 'center', position: 'relative' },
-  chartBar: { width: 40, borderRadius: 4, minHeight: 20 },
-  barValueLabel: { position: 'absolute', top: -20 },
-  barValue: { fontSize: 12, fontWeight: '600', color: '#ffffff' },
-  barLabel: { fontSize: 12, color: '#ffffff', marginTop: 8 },
-  timelineCard: { backgroundColor: '#1e293b', padding: 20, borderRadius: 12, marginBottom: 16 },
-  timelineTitle: { fontSize: 16, fontWeight: 'bold', color: '#ffffff', marginBottom: 16 },
-  timelineChart: {
-    flexDirection: 'row',
-    height: 120,
-    alignItems: 'flex-end',
-    justifyContent: 'space-around',
-    marginBottom: 8,
-  },
-  timelineBarContainer: { flex: 1, height: '100%', justifyContent: 'flex-end', alignItems: 'center' },
-  timelineBar: { width: 24, borderTopLeftRadius: 4, borderTopRightRadius: 4, minHeight: 10 },
-  timelineLabels: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 },
-  timelineLabel: { fontSize: 11, color: '#94a3b8' },
-  timelineLegend: { flexDirection: 'row', flexWrap: 'wrap', gap: 16 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 12, height: 12, borderRadius: 6 },
-  legendText: { fontSize: 11, color: '#94a3b8' },
-  stressScoreCard: {
-    flexDirection: 'row',
-    backgroundColor: '#ffffff',
-    padding: 20,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: '#5DADE2',
-    gap: 20,
-  },
-  scoreCircle: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    borderWidth: 8,
-    borderColor: '#a855f7',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  scoreValue: { fontSize: 36, fontWeight: 'bold', color: '#1e293b' },
-  metricsContainer: { flex: 1, justifyContent: 'space-around' },
-  metricRow: { gap: 4 },
-  metricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
-  metricDot: { width: 8, height: 8, borderRadius: 4 },
-  metricLabel: { fontSize: 12, color: '#64748b', flex: 1 },
-  metricValue: { fontSize: 12, fontWeight: '600', color: '#1e293b', marginBottom: 4 },
-  metricBar: { height: 8, backgroundColor: '#e2e8f0', borderRadius: 4, overflow: 'hidden' },
-  metricBarFill: { height: '100%', borderRadius: 4 },
-  insightCard: { flexDirection: 'row', backgroundColor: '#f8fafc', padding: 16, borderRadius: 12, marginBottom: 12 },
-  insightIcon: { width: 48, height: 48, borderRadius: 24, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
-  insightContent: { flex: 1 },
-  insightHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  insightTitle: { fontSize: 16, fontWeight: '600', color: '#1e293b' },
-  insightValue: { fontSize: 14, fontWeight: '600' },
-  insightDescription: { fontSize: 14, color: '#64748b', lineHeight: 20 },
-  journalCard: {
-    backgroundColor: '#f8fafc',
-    padding: 20,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
-    borderStyle: 'dashed',
-  },
-  journalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  journalDate: { fontSize: 16, fontWeight: '600', color: '#1e293b' },
-  journalPrompt: { fontSize: 14, color: '#64748b' },
 });

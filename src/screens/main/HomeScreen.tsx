@@ -14,12 +14,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useBLE } from '../../functionality/BLEContext';
 import { useAuth } from '../../auth/AuthContext';
 import { useSensorPipeline } from '../../hooks/useSensorPipeline';
-import { getRecentSessions, SessionSummary, saveWellnessEntry } from '../../firebase/dataLogger';
+import { getRecentSessions, SessionSummary } from '../../firebase/dataLogger';
 import { BluetoothScanModal } from '../../components/BluetoothScanModal';
 
 export default function HomeScreen() {
-  const [selectedMood, setSelectedMood] = useState<number | null>(null);
-  const [selectedSleep, setSelectedSleep] = useState<number | null>(null);
   const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [scanModalVisible, setScanModalVisible] = useState(false);
@@ -27,6 +25,15 @@ export default function HomeScreen() {
   const { isConnected, connectedDeviceName, disconnectDevice, statusMessage } = useBLE();
   const { user, logout } = useAuth();
   const { live, session, startSession, stopSession } = useSensorPipeline();
+
+  const safe = (value: number, fallback = 0) => (Number.isFinite(value) ? value : fallback);
+
+  const hasFresh = (updatedAt: Date | null) => {
+    if (!updatedAt) return false;
+    const ts = updatedAt.getTime();
+    if (!Number.isFinite(ts)) return false;
+    return Date.now() - ts < 15_000;
+  };
 
   const loadSessions = useCallback(() => {
     if (!user) { setSessionsLoading(false); return; }
@@ -48,36 +55,6 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!session.isRecording && !isConnected) loadSessions();
   }, [session.isRecording, isConnected, loadSessions]);
-
-  const moodIcons = ['sad', 'sad-outline', 'remove-circle-outline', 'happy-outline', 'happy'] as const;
-  const sleepIcons = ['moon', 'moon-outline', 'sunny'] as const;
-
-  const moodLabels = ['Very Sad', 'Sad', 'Neutral', 'Happy', 'Very Happy'];
-  const sleepLabels = ['Bad', 'Average', 'Good'];
-
-  const handleMoodSelect = async (index: number) => {
-    setSelectedMood(index);
-    if (user) {
-      await saveWellnessEntry(user.uid, {
-        entryType: 'mood',
-        value: index,
-        label: moodLabels[index],
-        date: new Date().toISOString().split('T')[0],
-      });
-    }
-  };
-
-  const handleSleepSelect = async (index: number) => {
-    setSelectedSleep(index);
-    if (user) {
-      await saveWellnessEntry(user.uid, {
-        entryType: 'sleep',
-        value: index,
-        label: sleepLabels[index],
-        date: new Date().toISOString().split('T')[0],
-      });
-    }
-  };
 
   const handleLogout = () => {
     Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
@@ -102,12 +79,42 @@ export default function HomeScreen() {
   const handleStopSession = async () => { await stopSession(); loadSessions(); };
 
   const getSensorCards = () => [
-    { icon: 'thermometer', value: live.temperature.lastUpdated ? `${live.temperature.tempC.toFixed(1)}°C` : '---', label: 'Temp', active: !!live.temperature.lastUpdated },
-    { icon: 'heart', value: live.ppg.lastUpdated ? `${(live.ppg.ir / 1000).toFixed(0)}k` : '---', label: 'PPG-IR', active: !!live.ppg.lastUpdated },
-    { icon: 'flash', value: live.eda.lastUpdated ? `${live.eda.conductance_uS.toFixed(2)}µS` : '---', label: 'EDA', active: !!live.eda.lastUpdated },
-    { icon: 'speedometer', value: live.accel.lastUpdated ? `${live.accel.magnitude.toFixed(0)}mg` : '---', label: 'Accel', active: !!live.accel.lastUpdated },
-    { icon: 'navigate', value: live.gyro.lastUpdated ? `${live.gyro.magnitude.toFixed(0)}` : '---', label: 'Gyro', active: !!live.gyro.lastUpdated },
-    { icon: 'pulse', value: live.eda.lastUpdated ? live.eda.stressLevel : '---', label: 'Stress', active: !!live.eda.lastUpdated },
+    {
+      icon: 'thermometer',
+      value: hasFresh(live.temperature.lastUpdated) ? `${safe(live.temperature.tempC).toFixed(1)}°C` : '---',
+      label: 'Temp',
+      active: hasFresh(live.temperature.lastUpdated),
+    },
+    {
+      icon: 'heart',
+      value: hasFresh(live.ppg.lastUpdated) ? `${Math.round(safe(live.ppg.ir)).toLocaleString()}` : '---',
+      label: 'PPG-IR',
+      active: hasFresh(live.ppg.lastUpdated),
+    },
+    {
+      icon: 'flash',
+      value: hasFresh(live.eda.lastUpdated) ? `${safe(live.eda.conductance_uS).toFixed(2)}µS` : '---',
+      label: 'EDA',
+      active: hasFresh(live.eda.lastUpdated),
+    },
+    {
+      icon: 'speedometer',
+      value: hasFresh(live.accel.lastUpdated) ? `${safe(live.accel.magnitude).toFixed(0)}mg` : '---',
+      label: 'Accel',
+      active: hasFresh(live.accel.lastUpdated),
+    },
+    {
+      icon: 'navigate',
+      value: hasFresh(live.gyro.lastUpdated) ? `${safe(live.gyro.magnitude).toFixed(0)}mdps` : '---',
+      label: 'Gyro',
+      active: hasFresh(live.gyro.lastUpdated),
+    },
+    {
+      icon: 'pulse',
+      value: hasFresh(live.eda.lastUpdated) ? live.eda.stressLevel : '---',
+      label: 'Stress',
+      active: hasFresh(live.eda.lastUpdated),
+    },
   ];
 
   return (
@@ -197,12 +204,15 @@ export default function HomeScreen() {
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Live Sensor Data</Text>
-              {session.isRecording && (
-                <View style={styles.recordingBadge}>
+              <View style={styles.liveHeaderRight}>
+                <Text style={styles.refreshHint}>Live firmware stream</Text>
+                {session.isRecording && (
+                  <View style={styles.recordingBadge}>
                   <View style={styles.recordingDot} />
                   <Text style={styles.recordingBadgeText}>REC</Text>
                 </View>
-              )}
+                )}
+              </View>
             </View>
             <View style={styles.sensorGrid}>
               {getSensorCards().map((card) => (
@@ -236,37 +246,6 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
         )}
-
-        {/* Mood */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>How do you feel today?</Text>
-          <View style={styles.moodContainer}>
-            {moodIcons.map((icon, index) => (
-              <TouchableOpacity key={index}
-                style={[styles.moodButton, selectedMood === index && styles.moodButtonSelected]}
-                onPress={() => handleMoodSelect(index)}>
-                <Ionicons name={icon} size={32} color={selectedMood === index ? '#5DADE2' : '#64748b'} />
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Sleep */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Sleep Quality</Text>
-          <View style={styles.sleepContainer}>
-            {sleepIcons.map((icon, index) => (
-              <TouchableOpacity key={index}
-                style={[styles.sleepButton, selectedSleep === index && styles.sleepButtonSelected]}
-                onPress={() => handleSleepSelect(index)}>
-                <Ionicons name={icon} size={28} color={selectedSleep === index ? '#5DADE2' : '#64748b'} />
-                <Text style={[styles.sleepLabel, selectedSleep === index && styles.sleepLabelActive]}>
-                  {index === 0 ? 'Bad' : index === 1 ? 'Average' : 'Good'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
 
         {/* Recent Sessions */}
         <View style={[styles.section, { paddingBottom: 32 }]}>
@@ -324,7 +303,9 @@ const styles = StyleSheet.create({
   logoutBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.2)', justifyContent: 'center', alignItems: 'center' },
   section: { paddingHorizontal: 16, paddingTop: 20 },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  liveHeaderRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   sectionTitle: { fontSize: 17, fontWeight: '700', color: '#1e293b', marginBottom: 12 },
+  refreshHint: { fontSize: 10, color: '#64748b', fontWeight: '600' },
   connectedCard: { borderRadius: 16, overflow: 'hidden', borderWidth: 2, borderColor: '#10b981', shadowColor: '#10b981', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.12, shadowRadius: 8, elevation: 4 },
   connectedGradient: { padding: 16 },
   connectedHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
@@ -363,14 +344,6 @@ const styles = StyleSheet.create({
   sensorLabel: { fontSize: 11, color: '#64748b', fontWeight: '600', textAlign: 'center' },
   connectPromptBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#e0f2fe', borderRadius: 12, padding: 14, marginTop: 12 },
   connectPromptText: { flex: 1, fontSize: 14, color: '#0369a1', fontWeight: '500' },
-  moodContainer: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
-  moodButton: { flex: 1, aspectRatio: 1, backgroundColor: '#ffffff', borderRadius: 12, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#e2e8f0' },
-  moodButtonSelected: { backgroundColor: '#e0f2fe', borderColor: '#5DADE2' },
-  sleepContainer: { flexDirection: 'row', gap: 10 },
-  sleepButton: { flex: 1, backgroundColor: '#ffffff', padding: 18, borderRadius: 12, alignItems: 'center', borderWidth: 2, borderColor: '#e2e8f0' },
-  sleepButtonSelected: { backgroundColor: '#e0f2fe', borderColor: '#5DADE2' },
-  sleepLabel: { fontSize: 13, color: '#64748b', fontWeight: '600', marginTop: 8 },
-  sleepLabelActive: { color: '#5DADE2' },
   emptySessionState: { alignItems: 'center', paddingVertical: 32, gap: 8 },
   emptySessionText: { fontSize: 16, fontWeight: '600', color: '#94a3b8' },
   emptySessionSub: { fontSize: 13, color: '#cbd5e1', textAlign: 'center' },

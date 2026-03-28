@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Switch, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../auth/AuthContext';
@@ -9,10 +9,6 @@ import { BluetoothScanModal } from '../../components/BluetoothScanModal';
 export default function SettingsScreen() {
   const { user, logout } = useAuth();
   const { isConnected, connectedDeviceName } = useBLE();
-  const [notifications, setNotifications] = useState(true);
-  const [autoConnect, setAutoConnect] = useState(false);
-  const [dataSync, setDataSync] = useState(true);
-  const [soundEnabled, setSoundEnabled] = useState(true);
   const [bleModalVisible, setBleModalVisible] = useState(false);
 
   const handleLogout = () => {
@@ -58,9 +54,6 @@ export default function SettingsScreen() {
                 <Text style={styles.profileName}>{user?.email?.split('@')[0] || 'User'}</Text>
                 <Text style={styles.profileEmail}>{user?.email || ''}</Text>
               </View>
-              <TouchableOpacity style={styles.editButton}>
-                <Ionicons name="pencil" size={20} color="#64748b" />
-              </TouchableOpacity>
             </View>
           </View>
 
@@ -88,75 +81,6 @@ export default function SettingsScreen() {
                 <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
               </TouchableOpacity>
 
-              <View style={styles.settingItem}>
-                <View style={styles.settingLeft}>
-                  <Ionicons name="bluetooth" size={24} color="#5DADE2" />
-                  <View style={styles.settingText}>
-                    <Text style={styles.settingTitle}>Auto-connect</Text>
-                    <Text style={styles.settingSubtitle}>Automatically connect to last device</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={autoConnect}
-                  onValueChange={setAutoConnect}
-                  trackColor={{ false: '#cbd5e1', true: '#5DADE2' }}
-                  thumbColor={autoConnect ? '#ffffff' : '#f1f5f9'}
-                />
-              </View>
-
-              <View style={styles.settingItem}>
-                <View style={styles.settingLeft}>
-                  <Ionicons name="volume-high" size={24} color="#5DADE2" />
-                  <View style={styles.settingText}>
-                    <Text style={styles.settingTitle}>Sound Effects</Text>
-                    <Text style={styles.settingSubtitle}>Play sounds during sessions</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={soundEnabled}
-                  onValueChange={setSoundEnabled}
-                  trackColor={{ false: '#cbd5e1', true: '#5DADE2' }}
-                  thumbColor={soundEnabled ? '#ffffff' : '#f1f5f9'}
-                />
-              </View>
-            </View>
-          </View>
-
-          {/* App Settings */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>App Settings</Text>
-            <View style={styles.settingsContainer}>
-              <View style={styles.settingItem}>
-                <View style={styles.settingLeft}>
-                  <Ionicons name="notifications" size={24} color="#5DADE2" />
-                  <View style={styles.settingText}>
-                    <Text style={styles.settingTitle}>Notifications</Text>
-                    <Text style={styles.settingSubtitle}>Session reminders and updates</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={notifications}
-                  onValueChange={setNotifications}
-                  trackColor={{ false: '#cbd5e1', true: '#5DADE2' }}
-                  thumbColor={notifications ? '#ffffff' : '#f1f5f9'}
-                />
-              </View>
-
-              <View style={styles.settingItem}>
-                <View style={styles.settingLeft}>
-                  <Ionicons name="cloud" size={24} color="#5DADE2" />
-                  <View style={styles.settingText}>
-                    <Text style={styles.settingTitle}>Data Sync</Text>
-                    <Text style={styles.settingSubtitle}>Sync data across devices</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={dataSync}
-                  onValueChange={setDataSync}
-                  trackColor={{ false: '#cbd5e1', true: '#5DADE2' }}
-                  thumbColor={dataSync ? '#ffffff' : '#f1f5f9'}
-                />
-              </View>
             </View>
           </View>
 
@@ -218,7 +142,6 @@ const styles = StyleSheet.create({
   profileInfo: { flex: 1 },
   profileName: { fontSize: 18, fontWeight: '600', color: '#1e293b', marginBottom: 2 },
   profileEmail: { fontSize: 14, color: '#64748b' },
-  editButton: { padding: 8 },
   settingsContainer: {
     backgroundColor: '#f8fafc',
     borderRadius: 12,

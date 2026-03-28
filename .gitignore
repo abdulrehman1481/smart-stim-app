@@ -2,6 +2,8 @@
 
 # dependencies
 node_modules/
+smartwatch_all_sensors/
+Stimulator_code_BLE_v1.0/
 
 # Expo
 .expo/

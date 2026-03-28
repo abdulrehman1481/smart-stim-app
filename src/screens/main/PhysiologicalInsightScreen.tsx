@@ -5,7 +5,6 @@ import {
   ScrollView,
   TouchableOpacity,
   StyleSheet,
-  Dimensions,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,11 +12,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSensorPipeline } from '../../hooks/useSensorPipeline';
 import { useBLE } from '../../functionality/BLEContext';
 
-const { width } = Dimensions.get('window');
-
 // ─── Types ────────────────────────────────────────────────────────────────────
-type TimelineTab = 'Day' | 'Week' | 'Month' | 'Year';
 interface PPGSample { ir: number; red: number; ts: number }
+type SensorPanelKey = 'ppg' | 'temperature' | 'eda' | 'accel' | 'gyro';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PPG_WINDOW_MS   = 15_000;
@@ -50,6 +47,10 @@ function stressLabel(level: string): string {
     case 'VERY_HIGH': return 'High Stress';
     default:          return level;
   }
+}
+
+function finiteOr(value: number, fallback = 0): number {
+  return Number.isFinite(value) ? value : fallback;
 }
 
 function detectPeaks(vals: number[]): number[] {
@@ -220,19 +221,11 @@ const ib = StyleSheet.create({
   text: { fontSize: 11, color: '#94A3B8', flex: 1, lineHeight: 16 },
 });
 
-// ─── Static sleep data ────────────────────────────────────────────────────────
-const SLEEP_STAGES = [
-  { stage: 'Awake', duration: 43,  color: '#EF4444', pct: 9  },
-  { stage: 'REM',   duration: 90,  color: '#F59E0B', pct: 19 },
-  { stage: 'Light', duration: 204, color: '#3B82F6', pct: 43 },
-  { stage: 'Deep',  duration: 137, color: '#10B981', pct: 29 },
-];
-
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function PhysiologicalInsightScreen() {
-  const [selectedTab, setSelectedTab] = useState<TimelineTab>('Day');
   const { live } = useSensorPipeline();
   const { isConnected } = useBLE();
+  const [selectedPanel, setSelectedPanel] = useState<SensorPanelKey>('ppg');
 
   const ppgBuf = useRef<PPGSample[]>([]);
   const [bpm,  setBpm]  = useState<number | null>(null);
@@ -250,6 +243,8 @@ export default function PhysiologicalInsightScreen() {
     ppgBuf.current.push({ ir: live.ppg.ir, red: live.ppg.red, ts: ppgTs });
     const cutoff = ppgTs - PPG_WINDOW_MS;
     ppgBuf.current = ppgBuf.current.filter(s => s.ts >= cutoff);
+
+    if (selectedPanel !== 'ppg') return;
 
     // Only run heavy computation at most every 500 ms
     if (ppgTs - lastComputeTs.current < 500) return;
@@ -276,16 +271,30 @@ export default function PhysiologicalInsightScreen() {
     }
   // ppgTs is a primitive number — safe to use as effect dependency
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ppgTs]);
+  }, [ppgTs, selectedPanel]);
 
   const ppgLive  = live.ppg.lastUpdated  !== null;
   const tempLive = live.temperature.lastUpdated !== null;
   const edaLive  = live.eda.lastUpdated  !== null;
-  const imuLive  = live.accel.lastUpdated !== null;
-  const activeSensors = [ppgLive, tempLive, edaLive, imuLive].filter(Boolean).length;
-  const tempCat  = tempLive ? tempCategory(live.temperature.tempC) : null;
+  const accelLive = live.accel.lastUpdated !== null;
+  const gyroLive  = live.gyro.lastUpdated !== null;
+  const activeSensors = [ppgLive, tempLive, edaLive, accelLive, gyroLive].filter(Boolean).length;
   const bpmColor = !bpm ? '#94A3B8' : bpm < 60 ? '#3B82F6' : bpm > 100 ? '#EF4444' : '#10B981';
-  const timelineTabs: TimelineTab[] = ['Day', 'Week', 'Month', 'Year'];
+  const safeTempC = finiteOr(live.temperature.tempC);
+  const safeTempF = finiteOr(live.temperature.tempF);
+  const safeEdaUS = finiteOr(live.eda.conductance_uS);
+  const safeEdaMv = finiteOr(live.eda.mv);
+  const safeEdaRaw = finiteOr(live.eda.rawADC);
+  const safePpgIr = finiteOr(live.ppg.ir);
+  const safePpgRed = finiteOr(live.ppg.red);
+  const safePpgGreen = finiteOr(live.ppg.green);
+  const safeAccelX = finiteOr(live.accel.x);
+  const safeAccelY = finiteOr(live.accel.y);
+  const safeAccelZ = finiteOr(live.accel.z);
+  const safeGyroX = finiteOr(live.gyro.x);
+  const safeGyroY = finiteOr(live.gyro.y);
+  const safeGyroZ = finiteOr(live.gyro.z);
+  const tempCat  = tempLive ? tempCategory(safeTempC) : null;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -298,7 +307,7 @@ export default function PhysiologicalInsightScreen() {
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Physiological Insights</Text>
           <Text style={styles.headerSub}>
-            {isConnected ? `${activeSensors} / 4 sensors active` : 'Device not connected — connect wristband'}
+            {isConnected ? `${activeSensors} / 5 sensors active` : 'Device not connected — connect wristband'}
           </Text>
         </View>
         <View style={[styles.connDot, { backgroundColor: isConnected ? '#10B981' : '#EF4444' }]} />
@@ -306,30 +315,41 @@ export default function PhysiologicalInsightScreen() {
 
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* Timeline tabs */}
-        <View style={styles.tabsRow}>
-          {timelineTabs.map(tab => (
-            <TouchableOpacity
-              key={tab}
-              style={[styles.tabBtn, selectedTab === tab && styles.tabBtnActive]}
-              onPress={() => setSelectedTab(tab)}>
-              <Text style={[styles.tabTxt, selectedTab === tab && styles.tabTxtActive]}>{tab}</Text>
-            </TouchableOpacity>
-          ))}
+        <View style={styles.panelTabsWrap}>
+          {[
+            { key: 'ppg', label: 'PPG', icon: 'heart' },
+            { key: 'temperature', label: 'Temp', icon: 'thermometer' },
+            { key: 'eda', label: 'EDA', icon: 'flash' },
+            { key: 'accel', label: 'Accel', icon: 'speedometer' },
+            { key: 'gyro', label: 'Gyro', icon: 'navigate' },
+          ].map((panel) => {
+            const active = selectedPanel === panel.key;
+            return (
+              <TouchableOpacity
+                key={panel.key}
+                style={[
+                  styles.panelTab,
+                  active && styles.panelTabActive,
+                ]}
+                onPress={() => setSelectedPanel(panel.key as SensorPanelKey)}>
+                <Ionicons
+                  name={panel.icon as any}
+                  size={13}
+                  color={active ? '#0F172A' : '#64748B'}
+                />
+                <Text style={[styles.panelTabText, active && styles.panelTabTextActive]}>
+                  {panel.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
-        {selectedTab !== 'Day' && (
-          <View style={styles.noteBanner}>
-            <Ionicons name="information-circle-outline" size={14} color="#5DADE2" />
-            <Text style={styles.noteTxt}>Weekly / Monthly / Yearly views coming soon.</Text>
-          </View>
-        )}
-
-        {/* ── CARDIAC ──────────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>CARDIAC</Text>
+        {/* ── PPG ──────────────────────────────────────────────────────────── */}
+        {selectedPanel === 'ppg' && <Text style={styles.sectionLabel}>MAX30101 PPG</Text>}
 
         {/* Heart Rate */}
-        <SensorCard accent="#EF4444" icon="heart" title="Heart Rate" isLive={ppgLive}>
+        {selectedPanel === 'ppg' && <SensorCard accent="#EF4444" icon="heart" title="Heart Rate" isLive={ppgLive}>
           <View style={styles.hrRow}>
             <View style={{ flex: 1 }}>
               <BigMetric value={bpm != null ? String(bpm) : '--'} unit=" bpm" color={bpmColor} />
@@ -353,9 +373,9 @@ export default function PhysiologicalInsightScreen() {
             <>
               <Sparkline samples={ppgBuf.current} color="#EF4444" />
               <View style={styles.channelRow}>
-                <ChannelPill label="IR"    value={live.ppg.ir}    color="#DC2626" />
-                <ChannelPill label="RED"   value={live.ppg.red}   color="#EF4444" />
-                <ChannelPill label="GREEN" value={live.ppg.green} color="#10B981" />
+                <ChannelPill label="IR" value={safePpgIr} color="#DC2626" />
+                <ChannelPill label="RED" value={safePpgRed} color="#EF4444" />
+                <ChannelPill label="GREEN" value={safePpgGreen} color="#10B981" />
               </View>
               <InfoBox text="MAX30101 · IR = infrared · SpO₂ via Beer-Lambert ratio-of-ratios (±2% estimate)" />
             </>
@@ -363,32 +383,32 @@ export default function PhysiologicalInsightScreen() {
           {!ppgLive && (
             <Text style={styles.waiting}>Place the wristband on your wrist to begin heartbeat monitoring.</Text>
           )}
-        </SensorCard>
+        </SensorCard>}
 
         {/* HRV */}
-        <SensorCard accent="#F97316" icon="pulse" title="Heart Rate Variability (HRV)" isLive={ppgLive}>
+        {selectedPanel === 'ppg' && <SensorCard accent="#F97316" icon="pulse" title="Heart Rate Variability (HRV)" isLive={ppgLive}>
           {ppgLive ? (
             <>
               <BigMetric value="--" unit=" ms RMSSD" color="#F97316" />
               <Text style={styles.sub}>Requires ≥60 s of still-wrist data · {ppgBuf.current.length} samples collected</Text>
-              <InfoBox text="HRV reflects autonomic nervous system balance. Higher RMSSD = better recovery and resilience." />
+              <InfoBox text="HRV computation is not finalized in this firmware build. Raw PPG is live; HRV will be enabled when validated." />
             </>
           ) : (
             <Text style={styles.waiting}>Waiting for PPG sensor…</Text>
           )}
-        </SensorCard>
+        </SensorCard>}
 
-        {/* ── METABOLISM ────────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>METABOLISM</Text>
+        {/* ── TEMP ─────────────────────────────────────────────────────────── */}
+        {selectedPanel === 'temperature' && <Text style={styles.sectionLabel}>AS6221 TEMPERATURE</Text>}
 
         {/* Skin Temperature */}
-        <SensorCard accent="#F59E0B" icon="thermometer" title="Skin Temperature" isLive={tempLive}>
+        {selectedPanel === 'temperature' && <SensorCard accent="#F59E0B" icon="thermometer" title="Skin Temperature" isLive={tempLive}>
           {tempLive ? (
             <>
               <View style={styles.hrRow}>
                 <View style={{ flex: 1 }}>
-                  <BigMetric value={live.temperature.tempC.toFixed(2)} unit=" °C" color="#B45309" />
-                  <Text style={styles.sub}>{live.temperature.tempF.toFixed(2)} °F</Text>
+                  <BigMetric value={safeTempC.toFixed(2)} unit=" °C" color="#B45309" />
+                  <Text style={styles.sub}>{safeTempF.toFixed(2)} °F</Text>
                 </View>
                 {tempCat && <MetricBadge label={tempCat.label} color={tempCat.color} />}
               </View>
@@ -397,19 +417,19 @@ export default function PhysiologicalInsightScreen() {
           ) : (
             <Text style={styles.waiting}>Waiting for AS6221 temperature sensor…</Text>
           )}
-        </SensorCard>
+        </SensorCard>}
 
-        {/* ── STRESS ───────────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>STRESS & AUTONOMIC</Text>
+        {/* ── EDA ──────────────────────────────────────────────────────────── */}
+        {selectedPanel === 'eda' && <Text style={styles.sectionLabel}>ADS1113 EDA / GSR</Text>}
 
         {/* EDA */}
-        <SensorCard accent="#8B5CF6" icon="flash" title="Electrodermal Activity (EDA / GSR)" isLive={edaLive}>
+        {selectedPanel === 'eda' && <SensorCard accent="#8B5CF6" icon="flash" title="Electrodermal Activity (EDA / GSR)" isLive={edaLive}>
           {edaLive ? (
             <>
               <View style={styles.hrRow}>
                 <View style={{ flex: 1 }}>
-                  <BigMetric value={live.eda.conductance_uS.toFixed(3)} unit=" µS" color="#6D28D9" />
-                  <Text style={styles.sub}>{live.eda.mv} mV · Raw ADC {live.eda.rawADC}</Text>
+                  <BigMetric value={safeEdaUS.toFixed(3)} unit=" µS" color="#6D28D9" />
+                  <Text style={styles.sub}>{safeEdaMv.toFixed(3)} mV · Raw ADC {safeEdaRaw}</Text>
                 </View>
                 <View style={[styles.stressBadge, { backgroundColor: stressColor(live.eda.stressLevel) + '20', borderColor: stressColor(live.eda.stressLevel) }]}>
                   <Text style={[styles.stressBadgeText, { color: stressColor(live.eda.stressLevel) }]}>
@@ -418,101 +438,42 @@ export default function PhysiologicalInsightScreen() {
                 </View>
               </View>
               <View style={styles.conductanceBarWrap}>
-                <View style={[styles.conductanceBar, { width: `${Math.min(live.eda.conductance_uS * 10, 100)}%`, backgroundColor: stressColor(live.eda.stressLevel) }]} />
+                <View style={[styles.conductanceBar, { width: `${Math.min(safeEdaUS * 10, 100)}%`, backgroundColor: stressColor(live.eda.stressLevel) }]} />
               </View>
               <InfoBox text="ADS1113 · GSR electrodes on inner wrist · Sweat-gland conductance rises with arousal & stress" />
             </>
           ) : (
             <Text style={styles.waiting}>Waiting for ADS1113 EDA sensor…</Text>
           )}
-        </SensorCard>
+        </SensorCard>}
 
-        {/* ── MOTION ───────────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>MOTION</Text>
+        {/* ── ACCEL ────────────────────────────────────────────────────────── */}
+        {selectedPanel === 'accel' && <Text style={styles.sectionLabel}>LSM6DSO ACCELEROMETER</Text>}
 
-        {/* IMU */}
-        <SensorCard accent="#3B82F6" icon="navigate" title="Motion & Orientation" isLive={imuLive}>
-          {imuLive ? (
+        {selectedPanel === 'accel' && <SensorCard accent="#3B82F6" icon="speedometer" title="Acceleration" isLive={accelLive}>
+          {accelLive ? (
             <>
-              <AxisRow label="Accelerometer" x={live.accel.x} y={live.accel.y} z={live.accel.z} unit="mg"   color="#3B82F6" />
-              <AxisRow label="Gyroscope"     x={live.gyro.x}  y={live.gyro.y}  z={live.gyro.z}  unit="mdps" color="#6366F1" />
+              <AxisRow label="Accelerometer" x={safeAccelX} y={safeAccelY} z={safeAccelZ} unit="mg" color="#3B82F6" />
               <InfoBox text={`LSM6DSO 6-axis IMU · Updated ${live.accel.lastUpdated!.toLocaleTimeString()}`} />
             </>
           ) : (
-            <Text style={styles.waiting}>Waiting for LSM6DSO IMU sensor…</Text>
+            <Text style={styles.waiting}>Waiting for LSM6DSO accelerometer…</Text>
           )}
-        </SensorCard>
+        </SensorCard>}
 
-        {/* ── CARDIOVASCULAR ────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>CARDIOVASCULAR</Text>
-        <View style={[scard.wrap, { borderLeftColor: '#94A3B8' }]}>
-          <View style={scard.header}>
-            <View style={[scard.iconCircle, { backgroundColor: '#F1F5F9' }]}>
-              <Ionicons name="fitness" size={18} color="#94A3B8" />
-            </View>
-            <Text style={scard.title}>Blood Pressure & Hardware SpO₂</Text>
-            <MetricBadge label="SOON" color="#94A3B8" />
-          </View>
-          <Text style={styles.sub}>Cuffless BP and hardware-computed SpO₂ will arrive in a future firmware update.</Text>
-        </View>
+        {/* ── GYRO ─────────────────────────────────────────────────────────── */}
+        {selectedPanel === 'gyro' && <Text style={styles.sectionLabel}>LSM6DSO GYROSCOPE</Text>}
 
-        {/* ── SLEEP ────────────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>SLEEP</Text>
-        <SensorCard accent="#1D4ED8" icon="bed" title="Sleep Insight" isLive={false}>
-          <View style={styles.hrRow}>
-            <View>
-              <BigMetric value="7h 34m" unit="" color="#1D4ED8" />
-              <Text style={styles.sub}>11:53 PM — 7:04 AM · Last night</Text>
-            </View>
-            <MetricBadge label="PLACEHOLDER" color="#94A3B8" />
-          </View>
-          <View style={styles.sleepTimeline}>
-            {SLEEP_STAGES.map((s, i) => (
-              <View key={i} style={[styles.sleepBlock, { flex: s.pct, backgroundColor: s.color }]} />
-            ))}
-          </View>
-          <View style={styles.sleepTicks}>
-            <Text style={styles.tick}>11:53 PM</Text>
-            <Text style={styles.tick}>3:28 AM</Text>
-            <Text style={styles.tick}>7:04 AM</Text>
-          </View>
-          {SLEEP_STAGES.map((s, i) => (
-            <View key={i} style={styles.stageRow}>
-              <View style={[styles.stageDot, { backgroundColor: s.color }]} />
-              <Text style={styles.stageName}>{s.stage}</Text>
-              <View style={styles.stageTrack}>
-                <View style={[styles.stageFill, { width: `${s.pct}%`, backgroundColor: s.color }]} />
-              </View>
-              <Text style={styles.stageDur}>{s.duration} min</Text>
-            </View>
-          ))}
-          <InfoBox text="Sleep staging will be automated from IMU + PPG sensor fusion in a future firmware update." />
-        </SensorCard>
-
-        {/* ── ACTIVITY ─────────────────────────────────────────────────────── */}
-        <Text style={styles.sectionLabel}>ACTIVITY</Text>
-        <SensorCard accent="#10B981" icon="walk" title="Activity Insight" isLive={imuLive}>
-          <BigMetric value="--" unit=" / 100" color="#10B981" />
-          <Text style={styles.sub}>Daily activity score · derived from IMU magnitude</Text>
-          <View style={styles.actGrid}>
-            {[
-              { type: 'Sedentary',   color: '#64748B', pct: 25 },
-              { type: 'Light',       color: '#F59E0B', pct: 40 },
-              { type: 'Fair Active', color: '#3B82F6', pct: 20 },
-              { type: 'Very Active', color: '#10B981', pct: 15 },
-            ].map((a, i) => (
-              <View key={i} style={styles.actRow}>
-                <View style={[styles.actDot, { backgroundColor: a.color }]} />
-                <Text style={styles.actLabel}>{a.type}</Text>
-                <View style={styles.actTrack}>
-                  <View style={[styles.actFill, { width: `${a.pct}%`, backgroundColor: a.color }]} />
-                </View>
-                <Text style={styles.actPct}>{a.pct}%</Text>
-              </View>
-            ))}
-          </View>
-          <InfoBox text="Real-time activity classification uses IMU accelerometer magnitude thresholds." />
-        </SensorCard>
+        {selectedPanel === 'gyro' && <SensorCard accent="#6366F1" icon="navigate" title="Angular Velocity" isLive={gyroLive}>
+          {gyroLive ? (
+            <>
+              <AxisRow label="Gyroscope" x={safeGyroX} y={safeGyroY} z={safeGyroZ} unit="mdps" color="#6366F1" />
+              <InfoBox text={`LSM6DSO 6-axis IMU · Updated ${live.gyro.lastUpdated!.toLocaleTimeString()}`} />
+            </>
+          ) : (
+            <Text style={styles.waiting}>Waiting for LSM6DSO gyroscope…</Text>
+          )}
+        </SensorCard>}
 
         <View style={{ height: 32 }} />
       </ScrollView>
@@ -532,14 +493,36 @@ const styles = StyleSheet.create({
 
   scroll: { flex: 1 },
 
-  tabsRow:     { flexDirection: 'row', backgroundColor: '#A3D9F0', paddingHorizontal: 16, paddingBottom: 14, gap: 8 },
-  tabBtn:      { flex: 1, paddingVertical: 8, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.4)', alignItems: 'center' },
-  tabBtnActive:{ backgroundColor: '#FFFFFF' },
-  tabTxt:      { fontSize: 13, fontWeight: '600', color: '#475569' },
-  tabTxtActive:{ color: '#5DADE2', fontWeight: '800' },
-
-  noteBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#E0F2FE', marginHorizontal: 16, marginTop: 12, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
-  noteTxt:    { fontSize: 12, color: '#0369A1', flex: 1 },
+  panelTabsWrap: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginTop: 14,
+    marginBottom: 6,
+    backgroundColor: '#E2ECF8',
+    borderRadius: 12,
+    padding: 4,
+    gap: 4,
+  },
+  panelTab: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 9,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  panelTabActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  panelTabText: {
+    fontSize: 12,
+    color: '#475569',
+    fontWeight: '700',
+  },
+  panelTabTextActive: {
+    color: '#0F172A',
+  },
 
   sectionLabel: { fontSize: 11, fontWeight: '800', color: '#94A3B8', letterSpacing: 1.2, textTransform: 'uppercase', marginHorizontal: 20, marginTop: 20, marginBottom: 8 },
 
@@ -563,24 +546,4 @@ const styles = StyleSheet.create({
 
   conductanceBarWrap: { height: 8, backgroundColor: '#EDE9FE', borderRadius: 4, marginTop: 10, overflow: 'hidden' },
   conductanceBar:     { height: '100%', borderRadius: 4 },
-
-  sleepTimeline: { flexDirection: 'row', height: 36, borderRadius: 8, overflow: 'hidden', marginBottom: 4 },
-  sleepBlock:    { height: '100%' },
-  sleepTicks:    { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
-  tick:          { fontSize: 10, color: '#94A3B8' },
-
-  stageRow:   { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
-  stageDot:   { width: 10, height: 10, borderRadius: 5 },
-  stageName:  { width: 46, fontSize: 12, fontWeight: '600', color: '#334155' },
-  stageTrack: { flex: 1, height: 6, backgroundColor: '#E2E8F0', borderRadius: 3, overflow: 'hidden' },
-  stageFill:  { height: '100%', borderRadius: 3 },
-  stageDur:   { width: 44, fontSize: 11, color: '#64748B', textAlign: 'right' },
-
-  actGrid:  { marginTop: 8, gap: 8 },
-  actRow:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  actDot:   { width: 10, height: 10, borderRadius: 5 },
-  actLabel: { width: 72, fontSize: 12, fontWeight: '600', color: '#334155' },
-  actTrack: { flex: 1, height: 6, backgroundColor: '#E2E8F0', borderRadius: 3, overflow: 'hidden' },
-  actFill:  { height: '100%', borderRadius: 3 },
-  actPct:   { width: 30, fontSize: 11, color: '#64748B', textAlign: 'right' },
 });
