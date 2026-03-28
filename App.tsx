@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from './src/auth/AuthContext';
 import { BLEProvider } from './src/functionality/BLEContext';
+import { SensorPipelineProvider } from './src/hooks/SensorPipelineContext';
 import { ActivityIndicator, Text, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import RootNavigator from './src/navigation/RootNavigator';
@@ -43,9 +44,11 @@ export default function App() {
       <StatusBar style="auto" />
       <AuthProvider>
         <BLEProvider>
-          <NavigationContainer>
-            <AppContent />
-          </NavigationContainer>
+          <SensorPipelineProvider>
+            <NavigationContainer>
+              <AppContent />
+            </NavigationContainer>
+          </SensorPipelineProvider>
         </BLEProvider>
       </AuthProvider>
     </SafeAreaProvider>

@@ -12,7 +12,7 @@ import { LineChart } from 'react-native-chart-kit';
 import { useBLE } from '../functionality/BLEContext';
 import { useAuth } from '../auth/AuthContext';
 import { saveSensorReading } from '../firebase/dataLogger';
-import { useSensorPipeline } from '../hooks/useSensorPipeline';
+import { useSharedSensorPipeline } from '../hooks/SensorPipelineContext';
 
 const WINDOW_SIZE = 100;
 const UPDATE_INTERVAL = 100; // 100ms = 10Hz sampling
@@ -48,7 +48,7 @@ export const WristbandSensorsPanel: React.FC = () => {
   const { user } = useAuth();
 
   // Live sensor data from the BLE→Parse→Firebase pipeline
-  const { live, session, startSession, stopSession } = useSensorPipeline();
+  const { live, session, startSession, stopSession } = useSharedSensorPipeline();
   
   const [isStreaming, setIsStreaming] = useState(false);
   const [useSyntheticData, setUseSyntheticData] = useState(false);

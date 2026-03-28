@@ -1,4 +1,4 @@
-import { BleManager, Device, Characteristic, State } from 'react-native-ble-plx';
+import { BleManager, Device, Characteristic, State, Subscription } from 'react-native-ble-plx';
 import { Platform } from 'react-native';
 import * as ExpoDevice from 'expo-device';
 import base64 from 'react-native-base64';
@@ -61,6 +61,8 @@ class BLEService {
    * a line to callers once we see a newline terminator.
    */
   private rxLineBuffer: string = '';
+  private notificationSubscriptions: Subscription[] = [];
+  private disconnectSubscription: Subscription | null = null;
 
   constructor() {
     this.manager = new BleManager();
@@ -314,13 +316,15 @@ class BLEService {
         await this.setupNotifications();
 
         // Monitor disconnection (unexpected / BLE-initiated only)
-        device.onDisconnected((error, disconnectedDevice) => {
+        this.disconnectSubscription?.remove();
+        this.disconnectSubscription = device.onDisconnected((error, disconnectedDevice) => {
           // If we called disconnect() intentionally, skip — it already fires
           // connectionCallback and setting the flag prevents a double-trigger
           // which can cause React state thrashing and app crashes on Android.
           if (this.isIntentionalDisconnect) return;
 
           console.log('[BLE] Device disconnected (remote):', disconnectedDevice?.name || disconnectedDevice?.id);
+          this.cleanupSubscriptions();
           this.connectedDevice = null;
           this.rxLineBuffer = '';
           if (this.connectionCallback) {
@@ -363,6 +367,7 @@ class BLEService {
 
     // Clear any stale fragment from a previous session
     this.rxLineBuffer = '';
+    this.cleanupSubscriptions();
 
     try {
       const protocol = this.currentProtocol;
@@ -419,22 +424,24 @@ class BLEService {
       // ── 1. Primary TX / notify characteristic ─────────────────────────────
       // For NRF_LOG_PROTOCOL: protocol.txCharUUID IS the log notify char.
       // For UART protocols: this is the UART TX (data from device).
-      this.connectedDevice.monitorCharacteristicForService(
+      const primarySub = this.connectedDevice.monitorCharacteristicForService(
         protocol.serviceUUID,
         protocol.txCharUUID,
         (error, char) => handleRawNotify(error, char, 'PRIMARY-NOTIFY')
       );
+      this.notificationSubscriptions.push(primarySub);
 
       // ── 2. nRF Zephyr BLE Log Service (secondary fallback) ────────────────
       // Only subscribe separately when the current protocol is NOT already the
       // log service (otherwise we'd double-subscribe the same characteristic).
       if (protocol.type !== BLEProtocolType.NRF_LOG_SERVICE) {
         try {
-          this.connectedDevice.monitorCharacteristicForService(
+          const logSub = this.connectedDevice.monitorCharacteristicForService(
             LOG_SERVICE_UUID,
             LOG_NOTIFY_UUID,
             (error, char) => handleRawNotify(error, char, 'LOG-NOTIFY')
           );
+          this.notificationSubscriptions.push(logSub);
           console.log('[BLE] ✓ Sensor-log notifications enabled (LOG_NOTIFY_UUID)');
         } catch (logErr: any) {
           console.log('[BLE] Log-service not available on this device (OK):', logErr?.message);
@@ -445,6 +452,26 @@ class BLEService {
     } catch (error: any) {
       console.error('[BLE] Failed to setup notifications:', error);
       this.handleError(`Failed to setup notifications: ${error?.message || error}`);
+    }
+  }
+
+  private cleanupSubscriptions(): void {
+    for (const sub of this.notificationSubscriptions) {
+      try {
+        sub.remove();
+      } catch {
+        // Ignore stale subscription cleanup failures.
+      }
+    }
+    this.notificationSubscriptions = [];
+
+    if (this.disconnectSubscription) {
+      try {
+        this.disconnectSubscription.remove();
+      } catch {
+        // Ignore stale subscription cleanup failures.
+      }
+      this.disconnectSubscription = null;
     }
   }
 
@@ -494,6 +521,7 @@ class BLEService {
       console.log('[BLE] Disconnecting from device:', this.connectedDevice.name || this.connectedDevice.id);
       // Guard flag prevents onDisconnected from firing a 2nd connectionCallback
       this.isIntentionalDisconnect = true;
+      this.cleanupSubscriptions();
       await this.manager.cancelDeviceConnection(this.connectedDevice.id);
       this.connectedDevice = null;
       this.rxLineBuffer = ''; // discard any partial line
@@ -504,6 +532,7 @@ class BLEService {
       console.log('[BLE] ✓ Disconnected successfully');
     } catch (error: any) {
       console.error('[BLE] Disconnect error:', error);
+      this.cleanupSubscriptions();
       this.connectedDevice = null;
       this.rxLineBuffer = '';
       if (this.connectionCallback) {
@@ -560,6 +589,7 @@ class BLEService {
   // Cleanup
   destroy(): void {
     this.stopScan();
+    this.cleanupSubscriptions();
     this.disconnect();
     this.manager.destroy();
   }

@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useSensorPipeline } from '../../hooks/useSensorPipeline';
+import { useSharedSensorPipeline } from '../../hooks/SensorPipelineContext';
 import { useBLE } from '../../functionality/BLEContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -51,6 +51,13 @@ function stressLabel(level: string): string {
 
 function finiteOr(value: number, fallback = 0): number {
   return Number.isFinite(value) ? value : fallback;
+}
+
+function isFresh(updatedAt: Date | null, maxAgeMs = 15_000): boolean {
+  if (!updatedAt) return false;
+  const ts = updatedAt.getTime();
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() - ts <= maxAgeMs;
 }
 
 function detectPeaks(vals: number[]): number[] {
@@ -223,7 +230,7 @@ const ib = StyleSheet.create({
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function PhysiologicalInsightScreen() {
-  const { live } = useSensorPipeline();
+  const { live } = useSharedSensorPipeline();
   const { isConnected } = useBLE();
   const [selectedPanel, setSelectedPanel] = useState<SensorPanelKey>('ppg');
 
@@ -295,6 +302,13 @@ export default function PhysiologicalInsightScreen() {
   const safeGyroY = finiteOr(live.gyro.y);
   const safeGyroZ = finiteOr(live.gyro.z);
   const tempCat  = tempLive ? tempCategory(safeTempC) : null;
+  const summaryTiles = [
+    { key: 'temp', label: 'Temp', value: `${safeTempC.toFixed(2)} C`, live: isFresh(live.temperature.lastUpdated), color: '#F59E0B' },
+    { key: 'ppg', label: 'PPG-IR', value: safePpgIr.toLocaleString(), live: isFresh(live.ppg.lastUpdated), color: '#EF4444' },
+    { key: 'eda', label: 'EDA', value: `${safeEdaUS.toFixed(3)} uS`, live: isFresh(live.eda.lastUpdated), color: '#8B5CF6' },
+    { key: 'accel', label: 'Accel |mag|', value: `${finiteOr(live.accel.magnitude).toFixed(0)} mg`, live: isFresh(live.accel.lastUpdated), color: '#3B82F6' },
+    { key: 'gyro', label: 'Gyro |mag|', value: `${finiteOr(live.gyro.magnitude).toFixed(0)} mdps`, live: isFresh(live.gyro.lastUpdated), color: '#6366F1' },
+  ];
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -343,6 +357,19 @@ export default function PhysiologicalInsightScreen() {
               </TouchableOpacity>
             );
           })}
+        </View>
+
+        <View style={styles.summaryGrid}>
+          {summaryTiles.map((tile) => (
+            <View key={tile.key} style={styles.summaryTile}>
+              <View style={styles.summaryTileHeader}>
+                <View style={[styles.summaryDot, { backgroundColor: tile.live ? '#10B981' : '#94A3B8' }]} />
+                <Text style={styles.summaryLabel}>{tile.label}</Text>
+              </View>
+              <Text style={[styles.summaryValue, { color: tile.live ? '#1E293B' : '#94A3B8' }]}>{tile.value}</Text>
+              <View style={[styles.summaryAccent, { backgroundColor: tile.color }]} />
+            </View>
+          ))}
         </View>
 
         {/* ── PPG ──────────────────────────────────────────────────────────── */}
@@ -522,6 +549,49 @@ const styles = StyleSheet.create({
   },
   panelTabTextActive: {
     color: '#0F172A',
+  },
+
+  summaryGrid: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 4,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  summaryTile: {
+    width: '48%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  summaryTileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  summaryDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  summaryLabel: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '700',
+  },
+  summaryValue: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  summaryAccent: {
+    marginTop: 8,
+    height: 2,
+    borderRadius: 2,
   },
 
   sectionLabel: { fontSize: 11, fontWeight: '800', color: '#94A3B8', letterSpacing: 1.2, textTransform: 'uppercase', marginHorizontal: 20, marginTop: 20, marginBottom: 8 },

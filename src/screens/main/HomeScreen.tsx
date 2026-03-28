@@ -13,7 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useBLE } from '../../functionality/BLEContext';
 import { useAuth } from '../../auth/AuthContext';
-import { useSensorPipeline } from '../../hooks/useSensorPipeline';
+import { useSharedSensorPipeline } from '../../hooks/SensorPipelineContext';
 import { getRecentSessions, SessionSummary } from '../../firebase/dataLogger';
 import { BluetoothScanModal } from '../../components/BluetoothScanModal';
 
@@ -24,7 +24,7 @@ export default function HomeScreen() {
 
   const { isConnected, connectedDeviceName, disconnectDevice, statusMessage } = useBLE();
   const { user, logout } = useAuth();
-  const { live, session, startSession, stopSession } = useSensorPipeline();
+  const { live, session, startSession, stopSession } = useSharedSensorPipeline();
 
   const safe = (value: number, fallback = 0) => (Number.isFinite(value) ? value : fallback);
 

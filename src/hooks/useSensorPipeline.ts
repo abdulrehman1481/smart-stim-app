@@ -215,6 +215,34 @@ export function useSensorPipeline() {
     edaUs: 5, // baseline conductance ~5 µS
   });
 
+  const hasPrevRef = useRef<{
+    gyro: { x: boolean; y: boolean; z: boolean };
+    accel: { x: boolean; y: boolean; z: boolean };
+    tempC: boolean;
+    edaUs: boolean;
+  }>({
+    gyro: { x: false, y: false, z: false },
+    accel: { x: false, y: false, z: false },
+    tempC: false,
+    edaUs: false,
+  });
+
+  const resetValidationState = useCallback(() => {
+    prevIMURef.current = {
+      gyro: { x: 0, y: 0, z: 0 },
+      accel: { x: 0, y: 0, z: 0 },
+      tempC: 25,
+      ppgIr: 100_000,
+      edaUs: 5,
+    };
+    hasPrevRef.current = {
+      gyro: { x: false, y: false, z: false },
+      accel: { x: false, y: false, z: false },
+      tempC: false,
+      edaUs: false,
+    };
+  }, []);
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   const canWriteToFirebase = useCallback((sensorKey: string): boolean => {
@@ -238,6 +266,11 @@ export function useSensorPipeline() {
    */
   const validateGyro = useCallback((axis: 'x' | 'y' | 'z', value: number): boolean => {
     const clamped = Math.max(-GYRO_MAX_MDPS, Math.min(GYRO_MAX_MDPS, value));
+    if (!hasPrevRef.current.gyro[axis]) {
+      prevIMURef.current.gyro[axis] = clamped;
+      hasPrevRef.current.gyro[axis] = true;
+      return true;
+    }
     const prev = prevIMURef.current.gyro[axis];
     const delta = Math.abs(clamped - prev);
     if (delta > GYRO_MAX_DELTA_MDPS) {
@@ -256,6 +289,11 @@ export function useSensorPipeline() {
    */
   const validateAccel = useCallback((axis: 'x' | 'y' | 'z', value: number): boolean => {
     const clamped = Math.max(-ACCEL_MAX_MG, Math.min(ACCEL_MAX_MG, value));
+    if (!hasPrevRef.current.accel[axis]) {
+      prevIMURef.current.accel[axis] = clamped;
+      hasPrevRef.current.accel[axis] = true;
+      return true;
+    }
     const prev = prevIMURef.current.accel[axis];
     const delta = Math.abs(clamped - prev);
     if (delta > ACCEL_MAX_DELTA_MG) {
@@ -273,6 +311,11 @@ export function useSensorPipeline() {
    */
   const validateTemp = useCallback((value: number): number => {
     const clamped = Math.max(TEMP_MIN_C, Math.min(TEMP_MAX_C, value));
+    if (!hasPrevRef.current.tempC) {
+      prevIMURef.current.tempC = clamped;
+      hasPrevRef.current.tempC = true;
+      return clamped;
+    }
     const prev = prevIMURef.current.tempC;
     const delta = Math.abs(clamped - prev);
     
@@ -311,6 +354,12 @@ export function useSensorPipeline() {
   const validateEDA = useCallback((value_uS: number): number => {
     if (!Number.isFinite(value_uS)) {
       return prevIMURef.current.edaUs;
+    }
+
+    if (!hasPrevRef.current.edaUs) {
+      prevIMURef.current.edaUs = value_uS;
+      hasPrevRef.current.edaUs = true;
+      return value_uS;
     }
     
     const prev = prevIMURef.current.edaUs;
@@ -779,7 +828,8 @@ export function useSensorPipeline() {
     if (isConnected) return;
     setLive(initialLiveState);
     liveRef.current = initialLiveState;
-  }, [isConnected]);
+    resetValidationState();
+  }, [isConnected, resetValidationState]);
 
   // Auto-stop session when user logs out.
   // This prevents in-flight Firestore writes after the auth token is revoked,
