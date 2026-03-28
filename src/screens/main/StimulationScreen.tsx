@@ -201,7 +201,7 @@ export default function StimulationScreen() {
     if (user) {
       try {
         await saveStimulationEvent(user.uid, {
-          waveform: 'BIPHASIC',
+          waveform: 'CUSTOM',
           frequency: 1000,
           amplitude: params.phase1,
           pulseWidth: params.tonpos,

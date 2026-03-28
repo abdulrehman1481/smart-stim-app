@@ -1,13 +1,13 @@
 // Shared UI components for consistent styling across the app
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ViewStyle, TextStyle, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ViewStyle, TextStyle, ScrollView, StyleProp } from 'react-native';
 import { theme } from '../../styles/theme';
 
 // Card Component
 interface CardProps {
   children: React.ReactNode;
   variant?: 'default' | 'elevated' | 'outlined';
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 }
 
 export const Card: React.FC<CardProps> = ({ children, variant = 'elevated', style }) => {
@@ -51,7 +51,7 @@ interface ButtonProps {
   disabled?: boolean;
   icon?: string;
   fullWidth?: boolean;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 }
 
 export const Button: React.FC<ButtonProps> = ({
@@ -135,7 +135,7 @@ export const StatsCard: React.FC<StatsCardProps> = ({ label, value, icon, color,
 interface BadgeProps {
   text: string;
   variant?: 'success' | 'warning' | 'error' | 'info' | 'default';
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 }
 
 export const Badge: React.FC<BadgeProps> = ({ text, variant = 'default', style }) => {

@@ -137,201 +137,324 @@ function extractMessage(line: string): string {
  * Parse AS6221 temperature log line.
  *
  * Expected message: `[AS6221] t=24.50 C | raw=2450 | uptime=1234 ms`
+ *
+ * SAFETY: Protected with try-catch, returns null on parse failure
  */
 function parseTemperature(message: string): TemperatureParsed | null {
-  // New firmware exact format from as6221_task.c:
-  // [AS6221] t=24.50 C | uptime=1234 ms
-  const strict = message.match(/^\[AS6221\]\s+t=([\-\d.]+)\s+C\s*\|\s*uptime=(\d+)\s+ms$/);
-  if (strict) {
-    const tempC = parseFloat(strict[1]);
-    const uptimeMs = parseInt(strict[2], 10);
+  try {
+    // New firmware exact format from as6221_task.c:
+    // [AS6221] t=24.50 C | uptime=1234 ms
+    const strict = message.match(/^\[AS6221\]\s+t=([\-\d.]+)\s+C\s*\|\s*uptime=(\d+)\s+ms$/);
+    if (strict) {
+      const tempC = parseFloat(strict[1]);
+      const uptimeMs = parseInt(strict[2], 10);
+      
+      // SAFETY: Validate parsed values
+      if (!isFinite(tempC) || !isFinite(uptimeMs)) {
+        console.warn('[SensorParser] Invalid temperature values');
+        return null;
+      }
+
+      return {
+        type: 'temperature',
+        tempC,
+        rawADC: Math.round(tempC * 100),
+        uptimeMs,
+      };
+    }
+
+    // Legacy format fallback:
+    const tempMatch = message.match(/t=([\-\d.]+)\s*C/);
+    const rawMatch  = message.match(/raw=(\d+)/);
+    const uptMatch  = message.match(/uptime=(\d+)/);
+
+    if (!tempMatch) return null;
+
+    const tempC = parseFloat(tempMatch[1]);
+    if (!isFinite(tempC)) {
+      console.warn('[SensorParser] Invalid temperature value');
+      return null;
+    }
+
     return {
-      type: 'temperature',
+      type:     'temperature',
       tempC,
-      // raw ADC is not emitted in this firmware string; keep deterministic fallback.
-      rawADC: Math.round(tempC * 100),
-      uptimeMs,
+      rawADC:   rawMatch  ? parseInt(rawMatch[1],  10) : 0,
+      uptimeMs: uptMatch  ? parseInt(uptMatch[1],  10) : 0,
     };
+  } catch (error) {
+    console.warn('[SensorParser] Error parsing temperature:', error);
+    return null;
   }
-
-  // Legacy format fallback:
-  // [AS6221] t=24.50 C | raw=2450 | uptime=1234 ms
-  // Match temperature
-  const tempMatch = message.match(/t=([\-\d.]+)\s*C/);
-  const rawMatch  = message.match(/raw=(\d+)/);
-  const uptMatch  = message.match(/uptime=(\d+)/);
-
-  if (!tempMatch) return null;
-
-  return {
-    type:     'temperature',
-    tempC:    parseFloat(tempMatch[1]),
-    rawADC:   rawMatch  ? parseInt(rawMatch[1],  10) : 0,
-    uptimeMs: uptMatch  ? parseInt(uptMatch[1],  10) : 0,
-  };
 }
 
 /**
  * Parse MAX30101 PPG FIFO log line.
  *
  * Expected message: `PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | avail=4`
+ *
+ * SAFETY: Protected with try-catch, returns null on parse failure
  */
 function parsePPG(message: string): PPGParsed | null {
-  // New firmware exact format from max30101_task.c:
-  // PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | t=1234
-  const strict = message.match(/^PPG\s+FIFO\s*\|\s*RED=(\d+)\s*\|\s*IR=(\d+)\s*\|\s*GREEN=(\d+)\s*\|\s*t=(\d+)$/);
-  if (strict) {
+  try {
+    // New firmware exact format from max30101_task.c:
+    // PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | t=1234
+    const strict = message.match(/^PPG\s+FIFO\s*\|\s*RED=(\d+)\s*\|\s*IR=(\d+)\s*\|\s*GREEN=(\d+)\s*\|\s*t=(\d+)$/);
+    if (strict) {
+      const red = parseInt(strict[1], 10);
+      const ir = parseInt(strict[2], 10);
+      const green = parseInt(strict[3], 10);
+
+      // SAFETY: Validate parsed values
+      if (!isFinite(red) || !isFinite(ir) || !isFinite(green)) {
+        console.warn('[SensorParser] Invalid PPG values');
+        return null;
+      }
+
+      return {
+        type: 'ppg',
+        red,
+        ir,
+        green,
+        available: 1,
+      };
+    }
+
+    // Legacy format fallback:
+    if (!message.includes('PPG FIFO')) return null;
+
+    const redMatch   = message.match(/RED=(\d+)/);
+    const irMatch    = message.match(/IR=(\d+)/);
+    const greenMatch = message.match(/GREEN=(\d+)/);
+    const availMatch = message.match(/avail=(\d+)/);
+
+    if (!redMatch || !irMatch || !greenMatch) return null;
+
+    const red = parseInt(redMatch[1], 10);
+    const ir = parseInt(irMatch[1], 10);
+    const green = parseInt(greenMatch[1], 10);
+
+    // SAFETY: Validate parsed values
+    if (!isFinite(red) || !isFinite(ir) || !isFinite(green)) {
+      console.warn('[SensorParser] Invalid PPG values');
+      return null;
+    }
+
     return {
-      type: 'ppg',
-      red: parseInt(strict[1], 10),
-      ir: parseInt(strict[2], 10),
-      green: parseInt(strict[3], 10),
-      available: 1,
+      type:      'ppg',
+      red,
+      ir,
+      green,
+      available: availMatch ? parseInt(availMatch[1], 10) : 1,
     };
+  } catch (error) {
+    console.warn('[SensorParser] Error parsing PPG:', error);
+    return null;
   }
-
-  // Legacy format fallback:
-  // PPG FIFO | RED=123456 | IR=234567 | GREEN=111222 | avail=4
-  if (!message.includes('PPG FIFO')) return null;
-
-  const redMatch   = message.match(/RED=(\d+)/);
-  const irMatch    = message.match(/IR=(\d+)/);
-  const greenMatch = message.match(/GREEN=(\d+)/);
-  const availMatch = message.match(/avail=(\d+)/);
-
-  if (!redMatch || !irMatch || !greenMatch) return null;
-
-  return {
-    type:      'ppg',
-    red:       parseInt(redMatch[1],   10),
-    ir:        parseInt(irMatch[1],    10),
-    green:     parseInt(greenMatch[1], 10),
-    available: availMatch ? parseInt(availMatch[1], 10) : 1,
-  };
 }
 
 /**
  * Parse newer calibrated LSM6DSO combined log line.
  *
  * Expected message: `[LSM6DSO] A[g]=[0.012 -0.045 1.003] G[dps]=[0.21 -0.10 0.05] t=1234`
+ *
+ * SAFETY: Protected with try-catch, returns null on parse failure
  */
 function parseIMUCombined(message: string): IMUCombinedParsed | null {
-  // Exact format from lsm6dso_task.c:
-  // [LSM6DSO] A[g]=[0.012 -0.045 1.003] G[dps]=[0.21 -0.10 0.05] t=1234
-  const strict = message.match(/^\[LSM6DSO\]\s+A\[g\]=\[\s*([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s*\]\s+G\[dps\]=\[\s*([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s*\]\s+t=(\d+)$/);
-  if (!strict) return null;
+  try {
+    const strict = message.match(/^\[LSM6DSO\]\s+A\[g\]=\[\s*([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s*\]\s+G\[dps\]=\[\s*([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)\s*\]\s+t=(\d+)$/);
+    if (!strict) return null;
 
-  const ax_g = parseFloat(strict[1]);
-  const ay_g = parseFloat(strict[2]);
-  const az_g = parseFloat(strict[3]);
-  const gx_dps = parseFloat(strict[4]);
-  const gy_dps = parseFloat(strict[5]);
-  const gz_dps = parseFloat(strict[6]);
+    const ax_g = parseFloat(strict[1]);
+    const ay_g = parseFloat(strict[2]);
+    const az_g = parseFloat(strict[3]);
+    const gx_dps = parseFloat(strict[4]);
+    const gy_dps = parseFloat(strict[5]);
+    const gz_dps = parseFloat(strict[6]);
 
-  return {
-    type: 'imu_combined',
-    ax_mg: Math.round(ax_g * 1000),
-    ay_mg: Math.round(ay_g * 1000),
-    az_mg: Math.round(az_g * 1000),
-    gx_mdps: Math.round(gx_dps * 1000),
-    gy_mdps: Math.round(gy_dps * 1000),
-    gz_mdps: Math.round(gz_dps * 1000),
-    uptimeMs: parseInt(strict[7], 10),
-  };
+    // SAFETY: Validate parsed values
+    if (!isFinite(ax_g) || !isFinite(ay_g) || !isFinite(az_g) ||
+        !isFinite(gx_dps) || !isFinite(gy_dps) || !isFinite(gz_dps)) {
+      console.warn('[SensorParser] Invalid IMU combined values');
+      return null;
+    }
+
+    return {
+      type: 'imu_combined',
+      ax_mg: Math.round(ax_g * 1000),
+      ay_mg: Math.round(ay_g * 1000),
+      az_mg: Math.round(az_g * 1000),
+      gx_mdps: Math.round(gx_dps * 1000),
+      gy_mdps: Math.round(gy_dps * 1000),
+      gz_mdps: Math.round(gz_dps * 1000),
+      uptimeMs: parseInt(strict[7], 10),
+    };
+  } catch (error) {
+    console.warn('[SensorParser] Error parsing IMU combined:', error);
+    return null;
+  }
 }
 
 /**
  * Parse LSM6DSO Gyroscope log line.
  *
  * Expected message: `[LSM6DSO] G RAW [  gx   gy   gz] mdps [  gx_mdps  gy_mdps  gz_mdps]`
+ *
+ * SAFETY: Protected with try-catch, returns null on parse failure
  */
 function parseIMUGyro(message: string): IMUGyroParsed | null {
-  if (!message.includes('[LSM6DSO]') || !message.includes('G RAW')) return null;
+  try {
+    if (!message.includes('[LSM6DSO]') || !message.includes('G RAW')) return null;
 
-  // Match two bracketed groups of three integers
-  const groups = [...message.matchAll(/\[\s*([\-\d]+)\s+([\-\d]+)\s+([\-\d]+)\s*\]/g)];
-  if (groups.length < 2) return null;
+    const groups = [...message.matchAll(/\[\s*([\-\d]+)\s+([\-\d]+)\s+([\-\d]+)\s*\]/g)];
+    if (groups.length < 2) return null;
 
-  const raw  = groups[0];
-  const mdps = groups[1];
+    const raw  = groups[0];
+    const mdps = groups[1];
 
-  return {
-    type:    'imu_gyro',
-    rawX:    parseInt(raw[1],  10),
-    rawY:    parseInt(raw[2],  10),
-    rawZ:    parseInt(raw[3],  10),
-    gx_mdps: parseInt(mdps[1], 10),
-    gy_mdps: parseInt(mdps[2], 10),
-    gz_mdps: parseInt(mdps[3], 10),
-  };
+    const rawX = parseInt(raw[1], 10);
+    const rawY = parseInt(raw[2], 10);
+    const rawZ = parseInt(raw[3], 10);
+    const gx_mdps = parseInt(mdps[1], 10);
+    const gy_mdps = parseInt(mdps[2], 10);
+    const gz_mdps = parseInt(mdps[3], 10);
+
+    // SAFETY: Validate parsed values
+    if (!isFinite(rawX) || !isFinite(rawY) || !isFinite(rawZ) ||
+        !isFinite(gx_mdps) || !isFinite(gy_mdps) || !isFinite(gz_mdps)) {
+      console.warn('[SensorParser] Invalid gyro values');
+      return null;
+    }
+
+    return {
+      type:    'imu_gyro',
+      rawX,
+      rawY,
+      rawZ,
+      gx_mdps,
+      gy_mdps,
+      gz_mdps,
+    };
+  } catch (error) {
+    console.warn('[SensorParser] Error parsing gyro:', error);
+    return null;
+  }
 }
 
 /**
  * Parse LSM6DSO Accelerometer log line.
  *
  * Expected message: `[LSM6DSO] A RAW [  ax   ay   az]  mg [  ax_mg   ay_mg   az_mg]`
+ *
+ * SAFETY: Protected with try-catch, returns null on parse failure
  */
 function parseIMUAccel(message: string): IMUAccelParsed | null {
-  if (!message.includes('[LSM6DSO]') || !message.includes('A RAW')) return null;
+  try {
+    if (!message.includes('[LSM6DSO]') || !message.includes('A RAW')) return null;
 
-  const groups = [...message.matchAll(/\[\s*([\-\d]+)\s+([\-\d]+)\s+([\-\d]+)\s*\]/g)];
-  if (groups.length < 2) return null;
+    const groups = [...message.matchAll(/\[\s*([\-\d]+)\s+([\-\d]+)\s+([\-\d]+)\s*\]/g)];
+    if (groups.length < 2) return null;
 
-  const raw = groups[0];
-  const mg  = groups[1];
+    const raw = groups[0];
+    const mg  = groups[1];
 
-  return {
-    type:  'imu_accel',
-    rawX:  parseInt(raw[1], 10),
-    rawY:  parseInt(raw[2], 10),
-    rawZ:  parseInt(raw[3], 10),
-    ax_mg: parseInt(mg[1],  10),
-    ay_mg: parseInt(mg[2],  10),
-    az_mg: parseInt(mg[3],  10),
-  };
+    const rawX = parseInt(raw[1], 10);
+    const rawY = parseInt(raw[2], 10);
+    const rawZ = parseInt(raw[3], 10);
+    const ax_mg = parseInt(mg[1], 10);
+    const ay_mg = parseInt(mg[2], 10);
+    const az_mg = parseInt(mg[3], 10);
+
+    // SAFETY: Validate parsed values
+    if (!isFinite(rawX) || !isFinite(rawY) || !isFinite(rawZ) ||
+        !isFinite(ax_mg) || !isFinite(ay_mg) || !isFinite(az_mg)) {
+      console.warn('[SensorParser] Invalid accel values');
+      return null;
+    }
+
+    return {
+      type:  'imu_accel',
+      rawX,
+      rawY,
+      rawZ,
+      ax_mg,
+      ay_mg,
+      az_mg,
+    };
+  } catch (error) {
+    console.warn('[SensorParser] Error parsing accel:', error);
+    return null;
+  }
 }
 
 /**
  * Parse ADS1113 EDA log line.
  *
  * Expected message: `t=1234ms raw=15000 mv=1875 dRaw=5 flat_cnt=0`
+ *
+ * SAFETY: Protected with try-catch, returns null on parse failure
  */
 function parseEDA(message: string): EDAParsed | null {
-  // Exact format from ads1113_task.c:
-  // t=1234ms raw=15000 mv=1875.000 uS=12.345 dRaw=5 flat_cnt=0
-  // Optional trailing token when flatline triggers: " FLATLINE"
-  const strict = message.match(/^t=(\d+)ms\s+raw=([\-\d]+)\s+mv=([\-\d.]+)\s+uS=([\-\d.]+)\s+dRaw=([\-\d]+)\s+flat_cnt=(\d+)(?:\s+FLATLINE)?$/);
-  if (strict) {
+  try {
+    const strict = message.match(/^t=(\d+)ms\s+raw=([\-\d]+)\s+mv=([\-\d.]+)\s+uS=([\-\d.]+)\s+dRaw=([\-\d]+)\s+flat_cnt=(\d+)(?:\s+FLATLINE)?$/);
+    if (strict) {
+      const uptimeMs = parseInt(strict[1], 10);
+      const rawADC = parseInt(strict[2], 10);
+      const mv = parseFloat(strict[3]);
+      const uS = parseFloat(strict[4]);
+      const deltaRaw = parseInt(strict[5], 10);
+      const flatCount = parseInt(strict[6], 10);
+
+      // SAFETY: Validate parsed values
+      if (!isFinite(uptimeMs) || !isFinite(rawADC) || !isFinite(mv) || !isFinite(uS) || !isFinite(deltaRaw) || !isFinite(flatCount)) {
+        console.warn('[SensorParser] Invalid EDA values');
+        return null;
+      }
+
+      return {
+        type: 'eda',
+        uptimeMs,
+        rawADC,
+        mv,
+        uS,
+        deltaRaw,
+        flatCount,
+      };
+    }
+
+    // Legacy fallback:
+    const timeMatch  = message.match(/t=(\d+)ms/);
+    const rawMatch   = message.match(/raw=([\-\d]+)/);
+    const mvMatch    = message.match(/mv=([\-\d.]+)/);
+    const uSMatch    = message.match(/uS=([\-\d.]+)/);
+    const deltaMatch = message.match(/dRaw=([\-\d]+)/);
+    const flatMatch  = message.match(/flat_cnt=(\d+)/);
+
+    if (!rawMatch || !mvMatch) return null;
+
+    const uptimeMs = timeMatch ? parseInt(timeMatch[1], 10) : 0;
+    const rawADC = parseInt(rawMatch[1], 10);
+    const mv = parseFloat(mvMatch[1]);
+
+    // SAFETY: Validate parsed values
+    if (!isFinite(uptimeMs) || !isFinite(rawADC) || !isFinite(mv)) {
+      console.warn('[SensorParser] Invalid EDA values (legacy)');
+      return null;
+    }
+
     return {
-      type: 'eda',
-      uptimeMs: parseInt(strict[1], 10),
-      rawADC: parseInt(strict[2], 10),
-      mv: parseFloat(strict[3]),
-      uS: parseFloat(strict[4]),
-      deltaRaw: parseInt(strict[5], 10),
-      flatCount: parseInt(strict[6], 10),
+      type:       'eda',
+      uptimeMs,
+      rawADC,
+      mv,
+      uS:         uSMatch ? parseFloat(uSMatch[1]) : undefined,
+      deltaRaw:   deltaMatch ? parseInt(deltaMatch[1], 10) : 0,
+      flatCount:  flatMatch  ? parseInt(flatMatch[1],  10) : 0,
     };
+  } catch (error) {
+    console.warn('[SensorParser] Error parsing EDA:', error);
+    return null;
   }
-
-  // Legacy fallback:
-  const timeMatch  = message.match(/t=(\d+)ms/);
-  const rawMatch   = message.match(/raw=([\-\d]+)/);
-  const mvMatch    = message.match(/mv=([\-\d.]+)/);
-  const uSMatch    = message.match(/uS=([\-\d.]+)/);
-  const deltaMatch = message.match(/dRaw=([\-\d]+)/);
-  const flatMatch  = message.match(/flat_cnt=(\d+)/);
-
-  if (!rawMatch || !mvMatch) return null;
-
-  return {
-    type:       'eda',
-    uptimeMs:   timeMatch  ? parseInt(timeMatch[1],  10) : 0,
-    rawADC:     parseInt(rawMatch[1],   10),
-    mv:         parseFloat(mvMatch[1]),
-    uS:         uSMatch ? parseFloat(uSMatch[1]) : undefined,
-    deltaRaw:   deltaMatch ? parseInt(deltaMatch[1], 10) : 0,
-    flatCount:  flatMatch  ? parseInt(flatMatch[1],  10) : 0,
-  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,32 +467,49 @@ function parseEDA(message: string): EDAParsed | null {
  * Returns a typed `ParsedSensorReading` if the line contains recognised
  * sensor data, or `null` for housekeeping / unknown lines.
  *
+ * SAFETY FEATURES:
+ * ✅ Wrapped in try-catch to handle parsing errors gracefully
+ * ✅ Returns null on invalid data instead of throwing
+ * ✅ Logs warnings for malformed lines (helps firmware debugging)
+ * ✅ App continues running even if firmware emits corrupted line
+ *
  * @param line  One complete log line (no newline character).
  */
 export function parseSensorLine(line: string): ParsedSensorReading | null {
-  const module  = extractModule(line);
-  const message = extractMessage(line);
-
-  switch (module) {
-    case 'as6221_demo':
-      return parseTemperature(message);
-
-    case 'max30101_demo':
-      return parsePPG(message);
-
-    case 'lsm6dso_app':
-      if (message.includes('A[g]=') && message.includes('G[dps]=')) {
-        return parseIMUCombined(message);
-      }
-      if (message.includes('G RAW')) return parseIMUGyro(message);
-      if (message.includes('A RAW')) return parseIMUAccel(message);
+  try {
+    // SAFETY: Validate input
+    if (typeof line !== 'string' || line.trim().length === 0) {
       return null;
+    }
 
-    case 'eda_raw':
-      return parseEDA(message);
+    const module  = extractModule(line);
+    const message = extractMessage(line);
 
-    default:
-      return null;
+    switch (module) {
+      case 'as6221_demo':
+        return parseTemperature(message);
+
+      case 'max30101_demo':
+        return parsePPG(message);
+
+      case 'lsm6dso_app':
+        if (message.includes('A[g]=') && message.includes('G[dps]=')) {
+          return parseIMUCombined(message);
+        }
+        if (message.includes('G RAW')) return parseIMUGyro(message);
+        if (message.includes('A RAW')) return parseIMUAccel(message);
+        return null;
+
+      case 'eda_raw':
+        return parseEDA(message);
+
+      default:
+        return null;
+    }
+  } catch (error) {
+    // SAFETY: Prevent parsing errors from crashing the app
+    console.warn('[SensorParser] Error parsing line:', line, error);
+    return null;
   }
 }
 

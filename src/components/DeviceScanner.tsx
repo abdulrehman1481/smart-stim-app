@@ -57,7 +57,7 @@ export const DeviceScanner: React.FC = () => {
                 {isThisConnected && ' (Connected)'}
               </Text>
               {item.protocol && (
-                <Badge variant={protocolVariant}>{protocolBadge}</Badge>
+                <Badge variant={protocolVariant} text={protocolBadge} />
               )}
             </View>
             <Text style={styles.deviceDetails}>

@@ -129,20 +129,47 @@ export const ADS1113Monitor: React.FC = () => {
    * ✅ Throttles state updates (200ms max frequency)
    */
   const processEDASample = useCallback((mvValue: number) => {
-    // Clamp to valid range
+    // SAFETY: Validate input is a number
+    if (typeof mvValue !== 'number' || !isFinite(mvValue)) {
+      console.warn('[ADS1113Monitor] Invalid EDA value:', mvValue);
+      return;
+    }
+
+    // Clamp to valid range to prevent calculation errors
     const clampedValue = clamp(mvValue, EDA_VOLTAGE_MIN, EDA_VOLTAGE_MAX);
     
     // Apply smoothing filter
     const smoothedValue = mvSmootherRef.current.update(clampedValue);
 
+    // SAFETY: Verify smoothing didn't produce NaN/Infinity
+    if (!isFinite(smoothedValue)) {
+      console.warn('[ADS1113Monitor] Smoothing produced NaN/Infinity');
+      return;
+    }
+
     // Add to circular buffer (auto-discard oldest if full)
     mvBufferRef.current.push(Math.abs(smoothedValue));
 
-    // Compute aggregated metrics
+    // Compute aggregated metrics with validation
     const allValues = mvBufferRef.current.getAll();
-    const avgMV = allValues.length > 0 ? allValues.reduce((a, b) => a + b, 0) / allValues.length : 0;
-    const maxMV = allValues.length > 0 ? Math.max(...allValues) : 0;
-    const stressLevelResult = estimateStressLevel(allValues);
+    
+    // SAFETY: Only compute with valid samples
+    const validValues = allValues.filter(v => isFinite(v) && v >= 0);
+    if (validValues.length === 0) {
+      console.warn('[ADS1113Monitor] No valid EDA values in buffer');
+      return;
+    }
+
+    const avgMV = validValues.reduce((a, b) => a + b, 0) / validValues.length;
+    const maxMV = Math.max(...validValues);
+
+    // SAFETY: Verify aggregation produced valid numbers
+    if (!isFinite(avgMV) || !isFinite(maxMV)) {
+      console.warn('[ADS1113Monitor] Invalid aggregated metrics');
+      return;
+    }
+
+    const stressLevelResult = estimateStressLevel(validValues);
 
     // Throttle state update (max once per 200ms)
     throttledUpdateState({
@@ -150,7 +177,7 @@ export const ADS1113Monitor: React.FC = () => {
       avgMV: Math.round(avgMV),
       maxMV: Math.round(maxMV),
       stressLevel: stressLevelResult,
-      sampleCount: allValues.length,
+      sampleCount: validValues.length,
       lastUpdated: new Date(),
     });
   }, [throttledUpdateState]);
@@ -196,7 +223,7 @@ export const ADS1113Monitor: React.FC = () => {
               conductance: conductance,
               stressLevel: aggregated.stressLevel as any,
               deviceId: connectedDevice?.id,
-              deviceName: connectedDevice?.name,
+              deviceName: connectedDevice?.name ?? undefined,
             }).catch(err => {
               console.error('[ADS1113] ❌ Failed to save EDA:', err);
             });

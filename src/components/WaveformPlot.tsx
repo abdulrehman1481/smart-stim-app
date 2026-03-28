@@ -24,6 +24,7 @@ interface WaveformData {
 
 export const WaveformPlot: React.FC = () => {
   const { isConnected, connectedDeviceName, receivedMessages } = useBLE();
+  const useSyntheticData = !isConnected;
   
   // State
   const [isStreaming, setIsStreaming] = useState(false);

@@ -40,6 +40,17 @@ interface WaveformData {
   }];
 }
 
+type FirebaseWaveform = 'SINE' | 'SQUARE' | 'TRIANGLE' | 'SAWTOOTH' | 'CUSTOM';
+
+const stimModeToFirebaseWaveform = (mode: StimMode): FirebaseWaveform => {
+  switch (mode) {
+    case StimMode.SINE:
+      return 'SINE';
+    default:
+      return 'CUSTOM';
+  }
+};
+
 export const ComprehensiveStimPanel: React.FC = () => {
   const { isConnected, connectedDeviceName, receivedMessages } = useBLE();
   const { user } = useAuth();
@@ -288,7 +299,7 @@ export const ComprehensiveStimPanel: React.FC = () => {
         
         if (ch0Active) {
           saveStimulationEvent(user.uid, {
-            waveform: STIM_MODE_NAMES[ch0Mode],
+            waveform: stimModeToFirebaseWaveform(ch0Mode),
             frequency: ch0Frequency,
             amplitude: intensityToAmplitude(ch0Intensity),
             pulseWidth: ch0PulseWidth,
@@ -299,7 +310,7 @@ export const ComprehensiveStimPanel: React.FC = () => {
         
         if (ch1Active) {
           saveStimulationEvent(user.uid, {
-            waveform: STIM_MODE_NAMES[ch1Mode],
+            waveform: stimModeToFirebaseWaveform(ch1Mode),
             frequency: ch1Frequency,
             amplitude: intensityToAmplitude(ch1Intensity),
             pulseWidth: ch1PulseWidth,

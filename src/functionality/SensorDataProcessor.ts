@@ -2,14 +2,30 @@
  * SensorDataProcessor.ts
  * 
  * Production-level utilities for safe sensor data handling:
+ * - Sampling Gate (drop excess BLE packets early)
+ * - Scheduled Processing (batch processing on intervals, not per-event)
  * - Throttling (prevent render storms)
  * - Smoothing (exponential moving average)
  * - Buffering (aggregate meaningful metrics)
  * - Memory leak prevention
  * 
  * ARCHITECTURE:
- *   BLE Stream (fast, noisy) → Buffer (raw data) → Processing (smooth/aggregate)
- *   → Throttle (200ms batches) → React State (slow, stable) → UI (smooth)
+ *   BLE Stream (fast, noisy)
+ *     ↓ [Sampling Gate: drop 60-80% of packets]
+ *   Parsing Layer (safe, validated)
+ *     ↓ [Queue parsed data]
+ *   Scheduled Processing (process every 100-200ms, NOT per event)
+ *     ↓ [Aggregation: smooth/compute metrics]
+ *   Throttle + Rate Limiter (200ms batches)
+ *     ↓
+ *   React State (slow, stable) → UI (smooth)
+ * 
+ * KEY RULES:
+ *   1. ❌ Do NOT process every BLE packet
+ *   2. 💪 High-frequency sensors MUST be downsampled BEFORE parsing
+ *   3. 📅 Processing runs on SCHEDULE, not per-event
+ *   4. 📺 UI updates at FIXED INTERVALS, not data arrival based
+ *   5. 🗑️ Drop data when overloaded instead of trying to keep up
  */
 
 /**
@@ -27,7 +43,227 @@ export function safeNumber(value: number, fallback: number = 0): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. THROTTLE UTILITIES
+// 1. SAMPLING GATE (drop excess data before processing) 🔥 KEY OPTIMIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sampling Gate: Drop incoming BLE packets to prevent processing overload.
+ * 
+ * The problem:
+ *   LSM6DSO streams 104 Hz → 100+ packets/second
+ *   High-frequency data causes React to re-render 100+ times/second
+ *   App becomes unresponsive, battery drains fast
+ * 
+ * The solution:
+ *   Drop 60-80% of packets IMMEDIATELY (before parsing/processing)
+ *   Keep only 1 in N packets, e.g., keep every 3rd packet from 104 Hz → 35 Hz effective
+ *   App processes only ~35 Hz instead of 104 Hz
+ *   User still perceives smooth motion (35 Hz > 30 Hz human perception threshold)
+ * 
+ * IMPORTANT: Drop happens at BLE reception, not after expensive processing
+ * 
+ * Usage:
+ *   const gate = new SamplingGate(3); // Keep 1 in 3 packets (drop 66%)
+ *   if (gate.shouldProcess()) {
+ *     parseAndProcess(data);
+ *   } // else: silently drop this packet, save CPU
+ */
+export class SamplingGate {
+  private packetCount: number = 0;
+
+  /**
+   * @param keepRatio - Keep 1 in N packets. E.g., keepRatio=3 → keep every 3rd packet
+   *   - keepRatio=1 → keep all (100%)
+   *   - keepRatio=2 → keep every 2nd (50%)
+   *   - keepRatio=3 → keep every 3rd (33%)
+   *   - keepRatio=5 → keep every 5th (20%)
+   */
+  constructor(private keepRatio: number = 3) {
+    if (keepRatio < 1) {
+      throw new Error('keepRatio must be >= 1');
+    }
+  }
+
+  /**
+   * Check if current packet should be processed.
+   * Returns true for approximately 1-in-keepRatio packets.
+   */
+  shouldProcess(): boolean {
+    const result = this.packetCount % this.keepRatio === 0;
+    this.packetCount++;
+    return result;
+  }
+
+  /**
+   * Reset counter (useful for debugging or when sensor reconnects).
+   */
+  reset(): void {
+    this.packetCount = 0;
+  }
+
+  /**
+   * Get statistics about sampling.
+   */
+  getStats(): { packetsReceived: number; packetsKept: number; dropPercentage: number } {
+    return {
+      packetsReceived: this.packetCount,
+      packetsKept: Math.ceil(this.packetCount / this.keepRatio),
+      dropPercentage: Math.round(((this.keepRatio - 1) / this.keepRatio) * 100),
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. SCHEDULED PROCESSING (batch processing on intervals) 🔥 KEY OPTIMIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Scheduled Processor: Queue incoming data and process on fixed intervals.
+ * 
+ * The problem:
+ *   Processing on every BLE notification → 100+ processing calls/sec
+ *   Each processing call does work: smoothing, aggregation, Firebase writes
+ *   App can't keep up, drops data or crashes
+ * 
+ * The solution:
+ *   1. Queue parsed sensor data (cheap operation)
+ *   2. On a schedule (every 100-200ms), process ALL queued data at once
+ *   3. Drain queue in batch, aggregate across batch
+ *   4. Single state update per batch → single re-render
+ * 
+ * IMPORTANT: Processing is decoupled from data arrival
+ * 
+ * Benefits:
+ *   - App never falls behind (data is queued, not dropped)
+ *   - Processing is predictable (always on schedule)
+ *   - Aggregation is more meaningful (averages across time window)
+ *   - Battery life improves (fewer operations, fewer re-renders)
+ * 
+ * Usage:
+ *   const processor = new ScheduledProcessor(() => {
+ *     // This runs every 100ms regardless of BLE packet frequency
+ *     const batchData = queue.drain();
+ *     processAndUpdateState(batchData);
+ *   }, 100); // milliseconds
+ *   
+ *   processor.start();
+ *   // ... app runs ...
+ *   processor.stop();
+ */
+export class ScheduledProcessor {
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private isRunning: boolean = false;
+
+  constructor(private processFn: () => void, private intervalMs: number = 100) {}
+
+  /**
+   * Start the scheduled processing loop.
+   */
+  start(): void {
+    if (this.isRunning) return;
+    this.isRunning = true;
+
+    this.intervalId = setInterval(() => {
+      try {
+        this.processFn();
+      } catch (error) {
+        console.warn('[ScheduledProcessor] Error during processing:', error);
+      }
+    }, this.intervalMs);
+  }
+
+  /**
+   * Stop the scheduled processing loop.
+   */
+  stop(): void {
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    this.isRunning = false;
+  }
+
+  /**
+   * Trigger processing immediately (useful for testing or emergency flush).
+   */
+  forceProcess(): void {
+    try {
+      this.processFn();
+    } catch (error) {
+      console.warn('[ScheduledProcessor] Error during forced processing:', error);
+    }
+  }
+
+  /**
+   * Check if processor is currently running.
+   */
+  getIsRunning(): boolean {
+    return this.isRunning;
+  }
+}
+
+/**
+ * Data Queue: Thread-safe queue for holding parsed sensor readings.
+ * 
+ * Usage:
+ *   const queue = new SensorDataQueue();
+ *   
+ *   // On BLE notification (fast)
+ *   const parsed = parseSensorLine(line);
+ *   queue.enqueue(parsed);
+ *   
+ *   // On scheduled processor interval (slow, controlled)
+ *   const batch = queue.drain();
+ *   processAndUpdateState(batch);
+ */
+export class SensorDataQueue<T> {
+  private queue: T[] = [];
+
+  /**
+   * Add item to queue.
+   */
+  enqueue(item: T): void {
+    if (this.queue.length > 1000) {
+      // Safety: prevent unbounded queue growth
+      console.warn('[SensorDataQueue] Queue exceeded 1000 items, dropping oldest');
+      this.queue.shift();
+    }
+    this.queue.push(item);
+  }
+
+  /**
+   * Remove and return all items in queue.
+   */
+  drain(): T[] {
+    const items = this.queue;
+    this.queue = [];
+    return items;
+  }
+
+  /**
+   * Peek at queue without removing items.
+   */
+  peek(): T | undefined {
+    return this.queue[0];
+  }
+
+  /**
+   * Get current queue size.
+   */
+  size(): number {
+    return this.queue.length;
+  }
+
+  /**
+   * Clear queue.
+   */
+  clear(): void {
+    this.queue = [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. THROTTLE UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -75,7 +311,7 @@ export function createThrottle<T extends any[]>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. SMOOTHING UTILITIES
+// 4. SMOOTHING UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -121,7 +357,7 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. BUFFER UTILITIES (with overflow protection)
+// 5. BUFFER UTILITIES (with overflow protection)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -186,7 +422,7 @@ export class CircularBuffer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. VECTOR UTILITIES
+// 6. VECTOR UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface Vector3 {
@@ -226,7 +462,7 @@ export function getMotionDirection(v: Vector3): 'x' | 'y' | 'z' | 'none' {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. SAFETY GUARDS
+// 7. SAFETY GUARDS
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -263,7 +499,7 @@ export function enforceBufferLimit<T>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. AGGREGATION UTILITIES (compute meaningful metrics)
+// 8. AGGREGATION UTILITIES (compute meaningful metrics)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface AggregatedMotionMetrics {
@@ -341,7 +577,7 @@ export function aggregateMotionData(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. HEART RATE CALCULATION (from PPG)
+// 9. HEART RATE CALCULATION (from PPG)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -381,7 +617,7 @@ export function estimateHeartRate(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. STRESS LEVEL ESTIMATION (from EDA)
+// 10. STRESS LEVEL ESTIMATION (from EDA)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type StressLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'VERY_HIGH';
