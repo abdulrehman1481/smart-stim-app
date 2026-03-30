@@ -67,6 +67,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   const [currentProtocol, setCurrentProtocol] = useState<BLEProtocol>(NORDIC_UART_PROTOCOL);
   const [selectedProtocols, setSelectedProtocols] = useState<BLEProtocol[]>(SUPPORTED_PROTOCOLS);
   const [autoConnectAttempted, setAutoConnectAttempted] = useState(false);
+  const isMountedRef = React.useRef(true);
+  const disconnectInFlightRef = React.useRef(false);
 
   // Auto-connect on startup
   useEffect(() => {
@@ -94,6 +96,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
 
     // Setup callbacks
     bleService.setDataCallback((data: string) => {
+      if (!isMountedRef.current) return;
       const timestamp = new Date().toLocaleTimeString();
       const message = `[${timestamp}] RX: ${data}`;
       // Keep last 2000 messages for the log monitor UI.
@@ -107,6 +110,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     });
 
     bleService.setConnectionCallback((connected: boolean, device) => {
+      if (!isMountedRef.current) return;
       // Wrap ALL setState calls in unstable_batchedUpdates so that native BLE
       // callbacks (which run outside React's event loop) produce ONE render
       // instead of 4-5 separate renders — preventing the disconnect crash and
@@ -130,6 +134,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     });
 
     bleService.setErrorCallback((error: string) => {
+      if (!isMountedRef.current) return;
       setStatusMessage(`Error: ${error}`);
       const timestamp = new Date().toLocaleTimeString();
       setReceivedMessages((prev) => [...prev, `[${timestamp}] ERROR: ${error}`]);
@@ -137,6 +142,10 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
 
     // Cleanup on unmount
     return () => {
+      isMountedRef.current = false;
+      bleService.setDataCallback(() => {});
+      bleService.setConnectionCallback(() => {});
+      bleService.setErrorCallback(() => {});
       bleService.destroy();
     };
   }, []);
@@ -308,6 +317,11 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   };
 
   const disconnectDevice = async () => {
+    if (disconnectInFlightRef.current) {
+      return;
+    }
+
+    disconnectInFlightRef.current = true;
     try {
       await bleService.disconnect();
       // State is updated via the connectionCallback registered above.
@@ -320,6 +334,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
       setConnectedDevice(null);
       setConnectedDeviceName(null);
       setStatusMessage('Disconnected');
+    } finally {
+      disconnectInFlightRef.current = false;
     }
   };
 

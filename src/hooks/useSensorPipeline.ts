@@ -199,6 +199,9 @@ export function useSensorPipeline() {
 
   // Firebase write throttle: track last write time per sensor type
   const lastFbWrite = useRef<Record<string, number>>({});
+  const isMountedRef = useRef(true);
+  const startInFlightRef = useRef(false);
+  const stopInFlightRef = useRef(false);
 
   // Track previous sensor values for rate-of-change validation
   const prevIMURef = useRef<{
@@ -240,6 +243,12 @@ export function useSensorPipeline() {
       accel: { x: false, y: false, z: false },
       tempC: false,
       edaUs: false,
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
     };
   }, []);
 
@@ -761,10 +770,16 @@ export function useSensorPipeline() {
   // ─────────────────────────────────────────────────────────────────────────
 
   const startSession = useCallback(async (sessionName?: string) => {
+    if (startInFlightRef.current || session.isRecording) {
+      return;
+    }
+
     if (!user) {
       console.warn('[Pipeline] Cannot start session – not logged in');
       return;
     }
+
+    startInFlightRef.current = true;
 
     const name = sessionName || `Session ${new Date().toLocaleString()}`;
 
@@ -794,23 +809,47 @@ export function useSensorPipeline() {
       console.log('[Pipeline] ✅ Session started:', sessionId);
     } catch (err) {
       console.error('[Pipeline] Failed to start session:', err);
+    } finally {
+      startInFlightRef.current = false;
     }
-  }, [user, connectedDevice, connectedDeviceName]);
+  }, [user, connectedDevice, connectedDeviceName, session.isRecording]);
 
   const stopSession = useCallback(async () => {
-    if (!user || !session.sessionId) return;
+    if (stopInFlightRef.current) {
+      return;
+    }
+
+    stopInFlightRef.current = true;
+    const activeSessionId = session.sessionId;
+    const savedPoints = session.dataPointsSaved;
+
+    // Stop recording immediately in UI to prevent any further write attempts.
+    if (isMountedRef.current) {
+      setSession(prev => ({ ...prev, isRecording: false }));
+    }
+
+    if (!user || !activeSessionId) {
+      if (isMountedRef.current) {
+        setSession(prev => ({ ...prev, sessionId: null, isRecording: false }));
+      }
+      stopInFlightRef.current = false;
+      return;
+    }
 
     try {
-      await fbEndSession(user.uid, session.sessionId, {
+      await fbEndSession(user.uid, activeSessionId, {
         qualityScore: 80, // Placeholder
       });
 
-      console.log('[Pipeline] ✅ Session ended:', session.sessionId,
-        '| Saved data points:', session.dataPointsSaved);
-
-      setSession(prev => ({ ...prev, sessionId: null, isRecording: false }));
+      console.log('[Pipeline] ✅ Session ended:', activeSessionId,
+        '| Saved data points:', savedPoints);
     } catch (err) {
       console.error('[Pipeline] Failed to end session:', err);
+    } finally {
+      if (isMountedRef.current) {
+        setSession(prev => ({ ...prev, sessionId: null, isRecording: false }));
+      }
+      stopInFlightRef.current = false;
     }
   }, [user, session.sessionId, session.dataPointsSaved]);
 
