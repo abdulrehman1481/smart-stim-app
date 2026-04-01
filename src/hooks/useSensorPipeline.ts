@@ -18,14 +18,21 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { DeviceEventEmitter } from 'react-native';
 import { useBLE } from '../functionality/BLEContext';
 import { useAuth } from '../auth/AuthContext';
+import { bleService } from '../functionality/BLEService';
 import {
   parseSensorLine,
   edaMvToMicrosiemens,
   magnitude,
   celsiusToFahrenheit,
   estimateStressLevel,
+  type ParsedSensorReading,
+  type TemperatureParsed,
+  type PPGParsed,
+  type IMUCombinedParsed,
+  type EDAParsed,
 } from '../functionality/SensorParser';
 import {
   saveTemperatureReading,
@@ -37,13 +44,171 @@ import {
   startSession as fbStartSession,
   endSession   as fbEndSession,
   saveDeviceInfo,
+  stopDataLogger,
+  startFirebaseWriteBatcher,
+  stopFirebaseWriteBatcher,
+  flushFirebaseWriteQueue,
 } from '../firebase/dataLogger';
 import { SensorType } from '../firebase/sensorTypes';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Live (in-memory) sensor state
+// DEBOUNCED STATE UPDATES (Prevent Update Storms)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Custom hook: useDebouncedState
+ * 
+ * Prevents UI update storms when data arrives at >60fps (high-frequency IMU).
+ * 
+ * The Problem:
+ *   LSM6DSO IMU streams 104 Hz → setState called 104 times/second
+ *   Each setState triggers re-render → browser can't keep up
+ *   App becomes unresponsive, battery drains fast
+ * 
+ * The Solution:
+ *   Batch multiple setState calls into single update every 16ms (60fps target)
+ *   requestAnimationFrame automatically syncs with browser refresh rate
+ *   User sees smooth motion at 60fps instead of choppy 104 updates
+ * 
+ * Implementation:
+ *   - setState queues new value
+ *   - requestAnimationFrame triggers actual state update
+ *   - If new value arrives before frame, only latest is processed
+ *   - App stays responsive, battery usage drops
+ * 
+ * Usage:
+ *   const [live, setLive] = useDebouncedState(initialLiveState, 16);
+ *   // Now setState calls are batched and won't exceed 60fps
+ */
+export function useDebouncedState<T>(
+  initialState: T,
+  delayMs: number = 16 // 16ms ≈ 60fps
+): [T, (newState: T | ((prev: T) => T)) => void] {
+  const [state, setState] = useState<T>(initialState);
+  const pendingStateRef = useRef<T | null>(null);
+  const animFrameIdRef = useRef<number | null>(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+      }
+    };
+  }, []);
+
+  const setDebouncedState = useCallback(
+    (newState: T | ((prev: T) => T)) => {
+      // Resolve functional updates
+      const resolvedState =
+        typeof newState === 'function'
+          ? (newState as (prev: T) => T)(state)
+          : newState;
+
+      // Queue the state update
+      pendingStateRef.current = resolvedState;
+
+      // Cancel existing frame request if any
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+      }
+
+      // Schedule state update on next animation frame
+      animFrameIdRef.current = requestAnimationFrame(() => {
+        if (isMountedRef.current && pendingStateRef.current !== null) {
+          setState(pendingStateRef.current);
+          pendingStateRef.current = null;
+        }
+        animFrameIdRef.current = null;
+      });
+    },
+    [state]
+  );
+
+  return [state, setDebouncedState];
+}
+
+/**
+ * Alternative: createDebouncedSetter (without hooks)
+ * 
+ * For use cases where you need debouncing but can't use hooks.
+ * Returns a function that batches setState calls.
+ * 
+ * Usage:
+ *   const setLiveFn = createDebouncedSetter(setLive);
+ *   // Calls to setLiveFn will be batched at 16ms intervals
+ */
+export function createDebouncedSetter<T>(
+  setter: (state: T) => void,
+  delayMs: number = 16
+): (newState: T | ((prev: T) => T)) => void {
+  let pendingState: T | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let lastState: T | undefined;
+
+  return (newState: T | ((prev: T) => T)) => {
+    const resolvedState =
+      typeof newState === 'function' && lastState !== undefined
+        ? (newState as (prev: T) => T)(lastState)
+        : newState;
+
+    pendingState = resolvedState as T;
+    lastState = resolvedState as T;
+
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+
+    timeoutId = setTimeout(() => {
+      if (pendingState !== null) {
+        setter(pendingState);
+        pendingState = null;
+      }
+      timeoutId = null;
+    }, delayMs);
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Live (in-memory) sensor state - SIMPLIFIED
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface IMUReading {
+  ax_mg: number;  // accelerometer x (mg)
+  ay_mg: number;  // accelerometer y (mg)
+  az_mg: number;  // accelerometer z (mg)
+  gx_mdps: number;  // stabilized gyroscope x (mdps)
+  gy_mdps: number;  // stabilized gyroscope y (mdps)
+  gz_mdps: number;  // stabilized gyroscope z (mdps)
+  raw_gx_mdps: number; // raw gyroscope x (mdps, Python-GUI style)
+  raw_gy_mdps: number; // raw gyroscope y (mdps, Python-GUI style)
+  raw_gz_mdps: number; // raw gyroscope z (mdps, Python-GUI style)
+}
+
+export interface SensorState {
+  red: number | null;
+  ir: number | null;
+  green: number | null;
+  imu: IMUReading | null;
+  edaRaw: number | null;
+  edaMv: number | null;
+  temp_c: number | null;
+  lastUpdate: number;
+}
+
+const initialSensorState: SensorState = {
+  red: null,
+  ir: null,
+  green: null,
+  imu: null,
+  edaRaw: null,
+  edaMv: null,
+  temp_c: null,
+  lastUpdate: 0,
+};
+
+// Keep old LiveSensorState for compatibility with other parts of code
 export interface LiveSensorState {
   /** AS6221 temperature sensor */
   temperature: {
@@ -68,9 +233,12 @@ export interface LiveSensorState {
   };
   /** LSM6DSO Gyroscope (mdps) */
   gyro: {
-    x: number;
-    y: number;
-    z: number;
+    x: number;      // stabilized
+    y: number;      // stabilized
+    z: number;      // stabilized
+    rawX: number;   // raw value from STORED_RAW_IMU / parser
+    rawY: number;
+    rawZ: number;
     magnitude: number;
     lastUpdated: Date | null;
   };
@@ -88,7 +256,7 @@ const initialLiveState: LiveSensorState = {
   temperature: { tempC: 0, tempF: 0, lastUpdated: null },
   ppg:         { red: 0, ir: 0, green: 0, lastUpdated: null },
   accel:       { x: 0, y: 0, z: 0, magnitude: 0, lastUpdated: null },
-  gyro:        { x: 0, y: 0, z: 0, magnitude: 0, lastUpdated: null },
+  gyro:        { x: 0, y: 0, z: 0, rawX: 0, rawY: 0, rawZ: 0, magnitude: 0, lastUpdated: null },
   eda:         { rawADC: 0, mv: 0, conductance_uS: 0, stressLevel: 'LOW', lastUpdated: null },
 };
 
@@ -154,6 +322,18 @@ const GYRO_MAX_MDPS = 250_000;
  *  Only rejects extreme spikes (aggressive shakes, sensor glitches).
  */
 const GYRO_MAX_DELTA_MDPS = 50_000;
+/** Deadband near 0 mdps to suppress sensor noise when device is still. */
+const GYRO_STILL_DEADBAND_MDPS = 900;
+/** EMA smoothing factor at rest (smaller = more smoothing). */
+const GYRO_SMOOTH_ALPHA_REST = 0.18;
+/** EMA smoothing factor while moving (larger = more responsive). */
+const GYRO_SMOOTH_ALPHA_MOTION = 0.45;
+/** Bias tracker learning rate when the device is still. */
+const GYRO_BIAS_TRACK_ALPHA = 0.02;
+/** Max bias magnitude we allow the tracker to learn. */
+const GYRO_BIAS_MAX_MDPS = 4_000;
+/** Gyro magnitude threshold considered still-ish for bias learning. */
+const GYRO_STILL_MAG_MDPS = 2_500;
 
 // ── ACCELEROMETER (LSM6DSO ±16g range) ────────────────────────────────────
 /** Accelerometer firmware range: ±16 g (±16,000 mg) */
@@ -163,6 +343,8 @@ const ACCEL_MAX_MG = 16_000;
  *  Only rejects extreme spikes (impact, sensor error).
  */
 const ACCEL_MAX_DELTA_MG = 2_000;
+/** Accel magnitude must be near 1g to consider device still. */
+const ACCEL_STILL_TOL_MG = 150;
 
 // ── EDA (ADS1113 16-bit signed) ───────────────────────────────────────────
 /** EDA raw ADC range: -32,768 to +32,767 (16-bit signed) */
@@ -197,11 +379,39 @@ export function useSensorPipeline() {
   const lastProcessedIdx = useRef<number>(0);
   const liveRef = useRef<LiveSensorState>(initialLiveState);
 
+  // ✅ UI STATE THROTTLING: Store latest readings in useRef, update UI at 33ms intervals
+  // This prevents React from freezing when high-frequency sensors (100Hz IMU, 100Hz PPG)
+  // try to update state on every packet.
+  const latestReadingsRef = useRef<SensorState>(initialSensorState);
+
   // Firebase write throttle: track last write time per sensor type
   const lastFbWrite = useRef<Record<string, number>>({});
   const isMountedRef = useRef(true);
   const startInFlightRef = useRef(false);
   const stopInFlightRef = useRef(false);
+
+  // CRITICAL: Keep user/session accessible to BLE listener without recreating it
+  // This allows Firebase writes to continue even if dependencies change
+  const userRef = useRef(user);
+  const sessionRef = useRef(session);
+  const connectedDeviceRef = useRef(connectedDevice);
+  const connectedDeviceNameRef = useRef(connectedDeviceName);
+
+  // Update refs whenever these change so BLE listener callback sees latest values
+  useEffect(() => {
+    userRef.current = user;
+    sessionRef.current = session;
+    connectedDeviceRef.current = connectedDevice;
+    connectedDeviceNameRef.current = connectedDeviceName;
+  }, [user, session, connectedDevice, connectedDeviceName]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Layer 3 & 4 Diagnostic Heartbeats
+  // ─────────────────────────────────────────────────────────────────────────
+  const layer3RejectionCountRef = useRef<number>(0);
+  const layer3LastHeartbeatRef = useRef<number>(Date.now());
+  const layer4LastHeartbeatRef = useRef<number>(Date.now());
+  const layer4RenderCountRef = useRef<number>(0);
 
   // Track previous sensor values for rate-of-change validation
   const prevIMURef = useRef<{
@@ -230,6 +440,9 @@ export function useSensorPipeline() {
     edaUs: false,
   });
 
+  // Per-axis gyro bias learned only while device is still.
+  const gyroBiasRef = useRef<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
+
   const resetValidationState = useCallback(() => {
     prevIMURef.current = {
       gyro: { x: 0, y: 0, z: 0 },
@@ -244,6 +457,7 @@ export function useSensorPipeline() {
       tempC: false,
       edaUs: false,
     };
+    gyroBiasRef.current = { x: 0, y: 0, z: 0 };
   }, []);
 
   useEffect(() => {
@@ -291,6 +505,47 @@ export function useSensorPipeline() {
     prevIMURef.current.gyro[axis] = clamped;
     return true;
   }, []);
+
+  /**
+   * Stabilize gyro per-axis with clamp + spike reject + deadband + EMA smoothing.
+   * This reduces jitter at rest while keeping motion responsive.
+   */
+  const stabilizeGyroAxis = useCallback((axis: 'x' | 'y' | 'z', value: number): number => {
+    const clamped = Math.max(-GYRO_MAX_MDPS, Math.min(GYRO_MAX_MDPS, toFinite(value, 0)));
+
+    if (!hasPrevRef.current.gyro[axis]) {
+      hasPrevRef.current.gyro[axis] = true;
+      prevIMURef.current.gyro[axis] = Math.abs(clamped) < GYRO_STILL_DEADBAND_MDPS ? 0 : clamped;
+      return prevIMURef.current.gyro[axis];
+    }
+
+    const prev = prevIMURef.current.gyro[axis];
+    const delta = Math.abs(clamped - prev);
+
+    // Reject impossible per-sample jumps.
+    if (delta > GYRO_MAX_DELTA_MDPS) {
+      if (ENABLE_VERBOSE_PIPELINE_LOGS) {
+        console.warn(`[Pipeline] GYRO-${axis} spike rejected: ${clamped} mdps (delta=${delta})`);
+      }
+      return prev;
+    }
+
+    // Treat near-zero as stillness and snap to zero to suppress drift/noise.
+    if (Math.abs(clamped) < GYRO_STILL_DEADBAND_MDPS && Math.abs(prev) < GYRO_STILL_DEADBAND_MDPS) {
+      prevIMURef.current.gyro[axis] = 0;
+      return 0;
+    }
+
+    const alpha = Math.abs(clamped) < (GYRO_STILL_DEADBAND_MDPS * 2)
+      ? GYRO_SMOOTH_ALPHA_REST
+      : GYRO_SMOOTH_ALPHA_MOTION;
+    const smoothed = (alpha * clamped) + ((1 - alpha) * prev);
+
+    // Final tiny-noise cleanup around zero after smoothing.
+    const finalVal = Math.abs(smoothed) < (GYRO_STILL_DEADBAND_MDPS * 0.75) ? 0 : smoothed;
+    prevIMURef.current.gyro[axis] = finalVal;
+    return finalVal;
+  }, [toFinite]);
 
   /**
    * Validate and clamp accelerometer value.
@@ -409,458 +664,426 @@ export function useSensorPipeline() {
   }, [user, isConnected, connectedDevice, connectedDeviceName]);
 
   // ── main message processor ────────────────────────────────────────────────
+  // DISABLED: This old BLEContext path conflicts with the new bleService.setDataCallback path.
+  // We now use ONLY the callback-based approach (Layer 3) for all BLE data ingestion.
 
+  // ── FIX #2: BULLETPROOF DEVICEEVENTEMITTER LISTENER (Layer 3) ───────────────────
+  // CRITICAL: Minimal dependency array to prevent listener recreation
+  // Old: 7-item deps array → recreated on every user/session/device change → data loss
+  // New: Just [isConnected] → listener persists → data streams continuously
   useEffect(() => {
-    // Guard: if receivedMessages was trimmed (length shrank), our absolute
-    // pointer overshoots.  Reset to the current length so we start fresh
-    // from the next incoming message rather than re-processing stale ones.
-    if (lastProcessedIdx.current > receivedMessages.length) {
-      lastProcessedIdx.current = receivedMessages.length;
-    }
-    // Only process NEW messages since the last render
-    let newMessages = receivedMessages.slice(lastProcessedIdx.current);
-    lastProcessedIdx.current = receivedMessages.length;
-
-    if (newMessages.length === 0) return;
-
-    if (newMessages.length > MAX_MESSAGES_PER_TICK) {
-      console.warn(
-        `[Pipeline] Backpressure: ${newMessages.length} new lines; processing latest ${MAX_MESSAGES_PER_TICK}`
-      );
-      newMessages = newMessages.slice(-MAX_MESSAGES_PER_TICK);
+    if (!isConnected) {
+      return; // Don't listen when disconnected
     }
 
-    const nextLive: LiveSensorState = {
-      temperature: { ...liveRef.current.temperature },
-      ppg: { ...liveRef.current.ppg },
-      accel: { ...liveRef.current.accel },
-      gyro: { ...liveRef.current.gyro },
-      eda: { ...liveRef.current.eda },
-    };
-    let liveChanged = false;
-    let parseErrors = 0;
-
-    for (const rawMsg of newMessages) {
-      // Strip the BLEContext timestamp prefix "[HH:MM:SS PM] RX: <line>"
-      // Permissive pattern handles AM/PM and any locale time format.
-      const line = rawMsg.replace(/^\[[^\]]+\]\s*RX:\s*/, '').trim();
-      if (!line) continue;
-
-      if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-        console.log('[Pipeline] RAW ←', line);
-      }
-
-      let parsed;
+    const handleBLEDataLine = (rawLine: string) => {
       try {
-        parsed = parseSensorLine(line);
-      } catch (error) {
-        parseErrors += 1;
-        console.warn('[Pipeline] Parse error:', error);
-        if (parseErrors >= MAX_PARSE_ERRORS_PER_TICK) {
-          console.warn('[Pipeline] Too many parse errors this tick; remaining lines dropped');
-          break;
-        }
-        continue;
-      }
-
-      if (!parsed) {
-        if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-          console.debug('[Pipeline] (not a sensor line):', line.slice(0, 80));
-        }
-        continue;
-      }
-
-      const now = new Date();
-      const deviceId   = connectedDevice?.id;
-      const deviceName = connectedDeviceName || undefined;
-      const sessionId  = session.sessionId || undefined;
-
-      switch (parsed.type) {
-        // ── Temperature ────────────────────────────────────────────────────
-        case 'temperature': {
-          const rawTempC = toFinite(parsed.tempC, nextLive.temperature.tempC);
-          const tempC = validateTemp(rawTempC); // Apply validation & spike rejection
-          const tempF = celsiusToFahrenheit(tempC);
-          if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-            console.log(
-              `[Pipeline] 🌡️  TEMP  ${tempC.toFixed(2)}°C  (${tempF.toFixed(2)}°F)  rawADC=${parsed.rawADC}  uptime=${parsed.uptimeMs}ms`
-            );
-          }
-          nextLive.temperature = { tempC, tempF, lastUpdated: now };
-          liveChanged = true;
-
-          if (user && session.isRecording && canWriteToFirebase('temperature')) {
-            markFbWrite('temperature');
-            saveTemperatureReading(user.uid, {
-              temperature:            tempC, // Use validated value
-              temperatureFahrenheit:  tempF,
-              bodyLocation:           'WRIST',
-              skinContact:            true,
-              deviceId,
-              deviceName,
-              sessionId,
-            })
-              .then(() => incDataPoints())
-              .catch(err => console.error('[Pipeline] Temp save failed:', err));
-          }
-          break;
+        const reading = parseSensorLine(rawLine);
+        if (!reading) {
+          return;
         }
 
-        // ── PPG ────────────────────────────────────────────────────────────
-        case 'ppg': {
-          const red = validatePPG('red', toFinite(parsed.red, nextLive.ppg.red));
-          const ir = validatePPG('ir', toFinite(parsed.ir, nextLive.ppg.ir));
-          const green = validatePPG('green', toFinite(parsed.green, nextLive.ppg.green));
-          if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-            console.log(
-              `[Pipeline] ❤️  PPG   RED=${red}  IR=${ir}  GREEN=${green}  avail=${parsed.available}`
-            );
-          }
-          nextLive.ppg = { red, ir, green, lastUpdated: now };
-          liveChanged = true;
-
-          if (user && session.isRecording && canWriteToFirebase('ppg')) {
-            markFbWrite('ppg');
-            // Save all three channels in parallel
-            Promise.all([
-              savePPGReading(user.uid, { channel: 'RED',   rawValue: red,   deviceId, deviceName, sessionId }),
-              savePPGReading(user.uid, { channel: 'IR',    rawValue: ir,    deviceId, deviceName, sessionId }),
-              savePPGReading(user.uid, { channel: 'GREEN', rawValue: green, deviceId, deviceName, sessionId }),
-            ])
-              .then(() => incDataPoints(3))
-              .catch(err => console.error('[Pipeline] PPG save failed:', err));
-          }
-          break;
-        }
-
-        // ── IMU Gyro ───────────────────────────────────────────────────────
-        case 'imu_gyro': {
-          const gx = toFinite(parsed.gx_mdps, nextLive.gyro.x);
-          const gy = toFinite(parsed.gy_mdps, nextLive.gyro.y);
-          const gz = toFinite(parsed.gz_mdps, nextLive.gyro.z);
-          
-          // Validate rate-of-change: reject if any axis exceeds max delta
-          if (!validateGyro('x', gx) || !validateGyro('y', gy) || !validateGyro('z', gz)) {
-            if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-              console.warn('[Pipeline] Gyro sample rejected (spike detected)');
+        const s = latestReadingsRef.current;
+        const now = Date.now();
+        
+        // Dispatch based on SensorReadingType
+        switch (reading.type) {
+          case 'temperature': {
+            const temp = reading as TemperatureParsed;
+            latestReadingsRef.current = {
+              ...s,
+              temp_c: temp.tempC ?? s.temp_c,
+              lastUpdate: now,
+            };
+            // Save to Firebase (with throttling)
+            if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('temperature')) {
+              saveTemperatureReading(userRef.current.uid, {
+                temperature: temp.tempC,
+                temperatureFahrenheit: celsiusToFahrenheit(temp.tempC),
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue temp reading:', err));
+              markFbWrite('temperature');
+              incDataPoints();
             }
             break;
           }
-          
-          const mag = magnitude(gx, gy, gz);
-          if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-            console.log(
-              `[Pipeline] 🎯 GYRO  X=${gx}mdps  Y=${gy}mdps  Z=${gz}mdps  |mag|=${mag.toFixed(0)}`
-            );
-          }
-          nextLive.gyro = {
-            x: gx,
-            y: gy,
-            z: gz,
-            magnitude: mag,
-            lastUpdated: now,
-          };
-          liveChanged = true;
-          break; // IMU saved together in 'imu_accel' branch
-        }
-
-        // ── IMU Accel ───────────────────────────────────────────────────────────────────
-        case 'imu_accel': {
-          const ax = toFinite(parsed.ax_mg, nextLive.accel.x);
-          const ay = toFinite(parsed.ay_mg, nextLive.accel.y);
-          const az = toFinite(parsed.az_mg, nextLive.accel.z);
-          
-          // Validate rate-of-change: reject if any axis exceeds max delta
-          if (!validateAccel('x', ax) || !validateAccel('y', ay) || !validateAccel('z', az)) {
-            if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-              console.warn('[Pipeline] Accel sample rejected (spike detected)');
+          case 'ppg': {
+            const ppg = reading as PPGParsed;
+            latestReadingsRef.current = {
+              ...s,
+              red: ppg.red ?? s.red,
+              ir: ppg.ir ?? s.ir,
+              green: ppg.green ?? s.green,
+              lastUpdate: now,
+            };
+            // Save to Firebase (with throttling)
+            if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('ppg')) {
+              // Save IR channel (primary for heart rate)
+              savePPGReading(userRef.current.uid, {
+                channel: 'IR',
+                rawValue: ppg.ir,
+                signalQuality: ppg.ir > 50000 ? 85 : 30, // Wear detection
+                skinContact: ppg.ir > 50000,
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue PPG reading:', err));
+              markFbWrite('ppg');
+              incDataPoints();
             }
             break;
           }
-          
-          const mag = magnitude(ax, ay, az);
-          if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-            console.log(
-              `[Pipeline] 📏 ACCEL X=${ax}mg  Y=${ay}mg  Z=${az}mg  |mag|=${mag.toFixed(0)}mg`
-            );
-          }
-          nextLive.accel = {
-            x: ax,
-            y: ay,
-            z: az,
-            magnitude: mag,
-            lastUpdated: now,
-          };
-          liveChanged = true;
+          case 'imu_combined': {
+            const imu = reading as IMUCombinedParsed;
 
-          if (user && session.isRecording && canWriteToFirebase('imu')) {
-            markFbWrite('imu');
-            const gyroSnapshot = nextLive.gyro;
-            // Save accel & gyro separately, then a combined IMU snapshot
-            Promise.all([
-              saveAccelerometerReading(user.uid, {
-                x: ax, y: ay, z: az,
-                rawX: parsed.rawX, rawY: parsed.rawY, rawZ: parsed.rawZ,
-                magnitude: mag,
-                deviceId, deviceName, sessionId,
-              }),
-              saveGyroscopeReading(user.uid, {
-                x: gyroSnapshot.x,
-                y: gyroSnapshot.y,
-                z: gyroSnapshot.z,
-                rawX: gyroSnapshot.x,
-                rawY: gyroSnapshot.y,
-                rawZ: gyroSnapshot.z,
-                magnitude: gyroSnapshot.magnitude,
-                deviceId,
-                deviceName,
-                sessionId,
-              }),
-              saveIMUReading(user.uid, {
-                accelerometer: { x: ax, y: ay, z: az, magnitude: mag },
-                gyroscope:     { x: gyroSnapshot.x, y: gyroSnapshot.y, z: gyroSnapshot.z },
-                deviceId, deviceName, sessionId,
-              }),
-            ])
-              .then(() => incDataPoints(3))
-              .catch(err => console.error('[Pipeline] IMU save failed:', err));
-          }
-          break;
-        }
+            // SURGICAL FIX: Bypass all stabilization filters - map DIRECTLY from parser to UI state
+            // Do NOT apply bias correction, stillness filter, or deadband.
+            // UI receives raw integer values straight from the device.
 
-        // ── IMU Combined (new calibrated firmware format) ─────────────────
-        case 'imu_combined': {
-          const ax = toFinite(parsed.ax_mg, nextLive.accel.x);
-          const ay = toFinite(parsed.ay_mg, nextLive.accel.y);
-          const az = toFinite(parsed.az_mg, nextLive.accel.z);
-          const gx = toFinite(parsed.gx_mdps, nextLive.gyro.x);
-          const gy = toFinite(parsed.gy_mdps, nextLive.gyro.y);
-          const gz = toFinite(parsed.gz_mdps, nextLive.gyro.z);
-          
-          // Validate rate-of-change: reject if any axis exceeds max delta
-          if (!validateAccel('x', ax) || !validateAccel('y', ay) || !validateAccel('z', az) ||
-              !validateGyro('x', gx) || !validateGyro('y', gy) || !validateGyro('z', gz)) {
-            if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-              console.warn('[Pipeline] IMU combined sample rejected (spike detected)');
+            // Map DIRECTLY to UI state - no stillness filter, no bias learning, no stabilization
+            latestReadingsRef.current = {
+              ...s,
+              imu: {
+                ax_mg: imu.ax_mg,
+                ay_mg: imu.ay_mg,
+                az_mg: imu.az_mg,
+                gx_mdps: imu.gx_mdps,
+                gy_mdps: imu.gy_mdps,
+                gz_mdps: imu.gz_mdps,
+                raw_gx_mdps: imu.gx_mdps,
+                raw_gy_mdps: imu.gy_mdps,
+                raw_gz_mdps: imu.gz_mdps,
+              },
+              lastUpdate: now,
+            };
+            // Save to Firebase (with throttling)
+            if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('imu')) {
+              // Save accel reading
+              saveAccelerometerReading(userRef.current.uid, {
+                x: imu.ax_mg,
+                y: imu.ay_mg,
+                z: imu.az_mg,
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue accel reading:', err));
+              
+              // Save gyro reading
+              saveGyroscopeReading(userRef.current.uid, {
+                x: imu.gx_mdps,
+                y: imu.gy_mdps,
+                z: imu.gz_mdps,
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue gyro reading:', err));
+              
+              markFbWrite('imu');
+              incDataPoints(2); // Counted as 2 readings (accel + gyro)
             }
             break;
           }
-          
-          const accelMag = magnitude(ax, ay, az);
-          const gyroMag = magnitude(gx, gy, gz);
-
-          if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-            console.log(
-              `[Pipeline] 📐 IMU  A=[${ax},${ay},${az}]mg G=[${gx},${gy},${gz}]mdps t=${parsed.uptimeMs}`
-            );
+          case 'eda': {
+            const eda = reading as EDAParsed;
+            latestReadingsRef.current = {
+              ...s,
+              edaRaw: eda.rawADC ?? s.edaRaw,
+              edaMv: eda.mv ?? s.edaMv,
+              lastUpdate: now,
+            };
+            // Save to Firebase (with throttling)
+            if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('eda')) {
+              // Calculate resistance from voltage
+              const voltage = (eda.mv || 0) / 1000;
+              const resistance = voltage > 0 ? (3.3 / voltage) : 100; // Default 100kΩ if invalid
+              const conductance = eda.mv !== null ? edaMvToMicrosiemens(eda.mv) : 1;
+              
+              saveEDAReading(userRef.current.uid, {
+                rawValue: eda.rawADC,
+                voltage: voltage,
+                resistance: Math.max(1, resistance), // Ensure positive
+                conductance: Math.max(0, conductance),
+                deviceId: connectedDeviceRef.current?.id,
+                deviceName: connectedDeviceNameRef.current || undefined,
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue EDA reading:', err));
+              markFbWrite('eda');
+              incDataPoints();
+            }
+            break;
           }
-
-          nextLive.accel = {
-            x: ax,
-            y: ay,
-            z: az,
-            magnitude: accelMag,
-            lastUpdated: now,
-          };
-          nextLive.gyro = {
-            x: gx,
-            y: gy,
-            z: gz,
-            magnitude: gyroMag,
-            lastUpdated: now,
-          };
-          liveChanged = true;
-
-          if (user && session.isRecording && canWriteToFirebase('imu')) {
-            markFbWrite('imu');
-            Promise.all([
-              saveAccelerometerReading(user.uid, {
-                x: ax,
-                y: ay,
-                z: az,
-                rawX: ax,
-                rawY: ay,
-                rawZ: az,
-                magnitude: accelMag,
-                deviceId,
-                deviceName,
-                sessionId,
-              }),
-              saveGyroscopeReading(user.uid, {
-                x: gx,
-                y: gy,
-                z: gz,
-                rawX: gx,
-                rawY: gy,
-                rawZ: gz,
-                magnitude: gyroMag,
-                deviceId,
-                deviceName,
-                sessionId,
-              }),
-              saveIMUReading(user.uid, {
-                accelerometer: {
-                  x: ax,
-                  y: ay,
-                  z: az,
-                  magnitude: accelMag,
-                },
-                gyroscope: {
-                  x: gx,
-                  y: gy,
-                  z: gz,
-                },
-                deviceId,
-                deviceName,
-                sessionId,
-              }),
-            ])
-              .then(() => incDataPoints(3))
-              .catch(err => console.error('[Pipeline] IMU save failed:', err));
-          }
-          break;
         }
-
-        // ── EDA ────────────────────────────────────────────────────────────
-        case 'eda': {
-          const rawADC = toFinite(parsed.rawADC, nextLive.eda.rawADC);
-          const mv = toFinite(parsed.mv, nextLive.eda.mv);
-          const rawConductance_uS = toFinite(parsed.uS ?? edaMvToMicrosiemens(mv), nextLive.eda.conductance_uS);
-          const conductance_uS = validateEDA(rawConductance_uS); // Apply validation & spike rejection
-          const stressLevel    = estimateStressLevel(conductance_uS);
-          if (ENABLE_VERBOSE_PIPELINE_LOGS) {
-            console.log(
-              `[Pipeline] ⚡ EDA   raw=${rawADC}  mv=${mv}mV  conductance=${conductance_uS.toFixed(3)}µS  stress=${stressLevel}  delta=${parsed.deltaRaw}  flat=${parsed.flatCount}`
-            );
-          }
-          nextLive.eda = { rawADC, mv, conductance_uS, stressLevel, lastUpdated: now };
-          liveChanged = true;
-
-          if (user && session.isRecording && canWriteToFirebase('eda')) {
-            markFbWrite('eda');
-            saveEDAReading(user.uid, {
-              rawValue:    rawADC,
-              voltage:     mv / 1000,
-              resistance:  conductance_uS > 0 ? 1000 / conductance_uS : 0,
-              conductance: conductance_uS, // Use validated value
-              stressLevel,
-              deviceId, deviceName, sessionId,
-            })
-              .then(() => incDataPoints())
-              .catch(err => console.error('[Pipeline] EDA save failed:', err));
-          }
-          break;
-        }
+      } catch (e) {
+        console.warn('[Pipeline] Data parsing error:', e);
       }
+    };
 
-      if (parseErrors >= MAX_PARSE_ERRORS_PER_TICK) {
-        break;
+    // Use singleton DeviceEventEmitter - never creates new instance
+    const subscription = DeviceEventEmitter.addListener('BLE_DATA_LINE', handleBLEDataLine);
+
+    return () => {
+      subscription.remove();
+    };
+  }, [isConnected]); // CRITICAL: Only re-subscribe on connect/disconnect
+
+  // ── FIX #3: UI RENDER THROTTLE (Layer 4: UI Heartbeat) ──────────────────────
+  // Bulletproof 33ms interval that pushes latestReadingsRef to React state
+  useEffect(() => {
+    let uiTicks = 0;
+    const intervalId = setInterval(() => {
+      uiTicks++;
+      const next = latestReadingsRef.current;
+      
+      // Atomically push latest readings to React state with explicit timestamp copy
+      if (isMountedRef.current) {
+        setLive(prev => {
+          if (prev.temperature.lastUpdated?.getTime?.() === next.lastUpdate) return prev; // No new data
+          // Construct LiveSensorState directly from SensorState
+          const now = new Date(next.lastUpdate);
+          return {
+            temperature: {
+              tempC: next.temp_c ?? 0,
+              tempF: next.temp_c !== null ? (next.temp_c * 9/5) + 32 : 0,
+              lastUpdated: now,
+            },
+            ppg: {
+              red: next.red ?? 0,
+              ir: next.ir ?? 0,
+              green: next.green ?? 0,
+              lastUpdated: now,
+            },
+            accel: {
+              x: next.imu?.ax_mg ?? 0,
+              y: next.imu?.ay_mg ?? 0,
+              z: next.imu?.az_mg ?? 0,
+              magnitude: next.imu ? Math.sqrt(
+                Math.pow(next.imu.ax_mg, 2) +
+                Math.pow(next.imu.ay_mg, 2) +
+                Math.pow(next.imu.az_mg, 2)
+              ) : 0,
+              lastUpdated: now,
+            },
+            gyro: {
+              x: next.imu?.gx_mdps ?? 0,
+              y: next.imu?.gy_mdps ?? 0,
+              z: next.imu?.gz_mdps ?? 0,
+              rawX: next.imu?.raw_gx_mdps ?? next.imu?.gx_mdps ?? 0,
+              rawY: next.imu?.raw_gy_mdps ?? next.imu?.gy_mdps ?? 0,
+              rawZ: next.imu?.raw_gz_mdps ?? next.imu?.gz_mdps ?? 0,
+              magnitude: next.imu ? Math.sqrt(
+                Math.pow(next.imu.gx_mdps, 2) +
+                Math.pow(next.imu.gy_mdps, 2) +
+                Math.pow(next.imu.gz_mdps, 2)
+              ) : 0,
+              lastUpdated: now,
+            },
+            eda: {
+              rawADC: next.edaRaw ?? 0,
+              mv: next.edaMv ?? 0,
+              conductance_uS: next.edaMv !== null ? edaMvToMicrosiemens(next.edaMv) : 0,
+              stressLevel: next.edaMv !== null ? estimateStressLevel(edaMvToMicrosiemens(next.edaMv)) : 'LOW',
+              lastUpdated: now,
+            },
+          };
+        });
       }
-    }
+    }, 33); // 33ms ≈ 30 FPS
 
-    if (liveChanged) {
-      setLive(nextLive);
-      liveRef.current = nextLive;
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receivedMessages]);
+    return () => clearInterval(intervalId);
+  }, []); // <-- EMPTY ARRAY (stable interval, doesn't depend on function identities)
 
   // ─────────────────────────────────────────────────────────────────────────
   // Session management
   // ─────────────────────────────────────────────────────────────────────────
 
-  const startSession = useCallback(async (sessionName?: string) => {
-    if (startInFlightRef.current || session.isRecording) {
-      return;
-    }
+  // ── FIX #3: SIMPLIFIED SESSION STATE MACHINE (No BLE Coupling) ──────────────
+  // Pure session & Firebase management - no BLE service interaction
+  const startSession = useCallback(
+    async (sessionName?: string) => {
+      // Guard: prevent double-starts
+      if (startInFlightRef.current) return;
+      if (session.isRecording) return;
+      if (!user) {
+        console.warn('[Session Action] Cannot start session – not logged in');
+        return;
+      }
 
-    if (!user) {
-      console.warn('[Pipeline] Cannot start session – not logged in');
-      return;
-    }
+      startInFlightRef.current = true;
+      console.log('[Session Action] Starting Recording...');
 
-    startInFlightRef.current = true;
+      try {
+        const name = sessionName || `Session ${new Date().toLocaleString()}`;
 
-    const name = sessionName || `Session ${new Date().toLocaleString()}`;
+        // Initialize Firebase session (creates Firestore document)
+        const sessionId = await fbStartSession(user.uid, {
+          sessionName: name,
+          deviceId: connectedDevice?.id,
+          deviceName: connectedDeviceName || undefined,
+          activeSensors: [
+            SensorType.TEMPERATURE,
+            SensorType.PPG_IR,
+            SensorType.PPG_RED,
+            SensorType.PPG_GREEN,
+            SensorType.ACCELEROMETER,
+            SensorType.GYROSCOPE,
+            SensorType.EDA,
+          ],
+        });
 
-    try {
-      const sessionId = await fbStartSession(user.uid, {
-        sessionName:    name,
-        deviceId:       connectedDevice?.id,
-        deviceName:     connectedDeviceName || undefined,
-        activeSensors:  [
-          SensorType.TEMPERATURE,
-          SensorType.PPG_IR,
-          SensorType.PPG_RED,
-          SensorType.PPG_GREEN,
-          SensorType.ACCELEROMETER,
-          SensorType.GYROSCOPE,
-          SensorType.EDA,
-        ],
-      });
+        // Start the Firebase write batcher to queue sensor data (3-second batches)
+        startFirebaseWriteBatcher();
 
-      setSession({
-        sessionId,
-        isRecording:    true,
-        startedAt:      new Date(),
-        dataPointsSaved: 0,
-      });
+        // Update React state with new session
+        setSession({
+          sessionId,
+          isRecording: true,
+          startedAt: new Date(),
+          dataPointsSaved: 0,
+        });
 
-      console.log('[Pipeline] ✅ Session started:', sessionId);
-    } catch (err) {
-      console.error('[Pipeline] Failed to start session:', err);
-    } finally {
-      startInFlightRef.current = false;
-    }
-  }, [user, connectedDevice, connectedDeviceName, session.isRecording]);
+        console.log('[Session Action] ✅ Recording started:', sessionId);
+      } catch (err) {
+        console.error('[Session Action] Failed to start session:', err);
+      } finally {
+        startInFlightRef.current = false;
+      }
+    },
+    [user, connectedDevice, connectedDeviceName]
+  );
 
   const stopSession = useCallback(async () => {
+    // Guard: prevent double-stops (CRITICAL for avoiding race conditions)
     if (stopInFlightRef.current) {
+      console.log('[Session Action] Stop already in progress, ignoring duplicate request');
+      return;
+    }
+    if (!session.isRecording) {
+      console.log('[Session Action] No active session to stop');
       return;
     }
 
     stopInFlightRef.current = true;
-    const activeSessionId = session.sessionId;
-    const savedPoints = session.dataPointsSaved;
-
-    // Stop recording immediately in UI to prevent any further write attempts.
-    if (isMountedRef.current) {
-      setSession(prev => ({ ...prev, isRecording: false }));
-    }
-
-    if (!user || !activeSessionId) {
-      if (isMountedRef.current) {
-        setSession(prev => ({ ...prev, sessionId: null, isRecording: false }));
-      }
-      stopInFlightRef.current = false;
-      return;
-    }
+    console.log('[Session Action] 🔄 Graceful shutdown sequence started...');
 
     try {
-      await fbEndSession(user.uid, activeSessionId, {
-        qualityScore: 80, // Placeholder
-      });
+      // Wrap entire shutdown in timeout to prevent infinite hangs
+      await Promise.race([
+        (async () => {
+          // STEP 0: Add small initial delay to allow in-flight operations to settle
+          // This prevents "flush while another write is happening" errors
+          try {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } catch (delayErr) {
+            // Ignore delay errors (shouldn't happen)
+          }
 
-      console.log('[Pipeline] ✅ Session ended:', activeSessionId,
-        '| Saved data points:', savedPoints);
-    } catch (err) {
-      console.error('[Pipeline] Failed to end session:', err);
+          // STEP 1: Flush any remaining Firebase writes before ending session
+          // This is the most critical step - must complete before Firestore session ends
+          if (session.sessionId) {
+            console.log('[Session Action] 📤 Flushing remaining Firebase writes...');
+            try {
+              await Promise.race([
+                flushFirebaseWriteQueue(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Flush timeout')), 4000))
+              ]);
+              console.log('[Session Action] ✅ Firebase flush completed');
+            } catch (flushErr: any) {
+              console.warn('[Session Action] ⚠️  Firebase flush failed (non-critical):', flushErr?.message || flushErr);
+              // DON'T crash - flush can fail if queue is empty or already flushing
+              // Continue with session end to avoid hanging
+            }
+          }
+
+          // STEP 2: Stop the Firebase write batcher
+          // This prevents new writes from being queued while session is ending
+          if (user?.uid) {
+            console.log('[Session Action] 🛑 Stopping Firebase write batcher...');
+            try {
+              stopDataLogger(user.uid);
+              console.log('[Session Action] ✅ Write batcher stopped');
+            } catch (stopErr: any) {
+              console.warn('[Session Action] ⚠️  stopDataLogger error (non-critical):', stopErr?.message || stopErr);
+              // Continue - batcher stop failure won't crash session end
+            }
+          }
+          
+          // STEP 3: Add a small grace period for any async operations to complete
+          try {
+            await new Promise(resolve => setTimeout(resolve, 200));
+          } catch (delayErr) {
+            // Ignore
+          }
+
+          // STEP 4: End session on Firestore
+          // This finalizes the session and prevents orphaned data
+          if (user?.uid && session.sessionId) {
+            console.log('[Session Action] 📋 Finalizing Firestore session...');
+            try {
+              await Promise.race([
+                fbEndSession(user.uid, session.sessionId, { qualityScore: 80 }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Session end timeout')), 6000))
+              ]);
+              console.log('[Session Action] ✅ Session ended:', session.sessionId);
+            } catch (endErr: any) {
+              console.warn('[Session Action] ⚠️  Session end failed (non-critical):', endErr?.message || endErr);
+              // Continue - session state will be cleared anyway
+            }
+          }
+
+          console.log('[Session Action] ✅ Graceful shutdown completed successfully');
+        })(),
+        // Overall timeout: 12 seconds for entire shutdown
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Complete shutdown timeout')), 12000)
+        )
+      ]);
+    } catch (err: any) {
+      // Catch-all for unexpected errors during shutdown
+      // This should NOT crash the app - just log and continue
+      console.error('[Session Action] ❌ Shutdown error (proceeding anyway):', err?.message || err);
     } finally {
-      if (isMountedRef.current) {
-        setSession(prev => ({ ...prev, sessionId: null, isRecording: false }));
+      // CRITICAL: Always clear session state to allow reconnection
+      // This must happen even if any step failed, otherwise app will hang
+      try {
+        setSession({
+          sessionId: null,
+          isRecording: false,
+          startedAt: null,
+          dataPointsSaved: 0,
+        });
+        console.log('[Session Action] ✅ React state cleared, ready for reconnection');
+      } catch (stateErr) {
+        console.error('[Session Action] ❌ Failed to clear React state:', stateErr);
       }
+
+      // Finally, allow new stop requests
       stopInFlightRef.current = false;
     }
-  }, [user, session.sessionId, session.dataPointsSaved]);
+  }, [user, session.sessionId, session.isRecording]);
 
-  // Auto-stop session when device disconnects
+  // Auto-stop session when device disconnects (SAFE: guarded by stopSession)
   useEffect(() => {
     if (!isConnected && session.isRecording) {
-      console.log('[Pipeline] Device disconnected \u2013 stopping active session');
-      stopSession();
+      console.log('[Session Action] Device disconnected – stopping active session');
+      // Wrap in error boundary to prevent unhandled promise rejection crashes
+      stopSession().catch((err: any) => {
+        console.error('[Session Action] ❌ stopSession promise rejection (contained):', err?.message || err);
+        // Force clear state as last resort
+        try {
+          setSession({
+            sessionId: null,
+            isRecording: false,
+            startedAt: null,
+            dataPointsSaved: 0,
+          });
+        } catch (stateErr) {
+          console.error('[Session Action] ❌ Final state clear failed:', stateErr);
+        }
+      });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnected]);
+  }, [isConnected, session.isRecording, stopSession]);
 
   // Clear live values after disconnect so UI does not keep stale readings.
   useEffect(() => {
@@ -870,16 +1093,28 @@ export function useSensorPipeline() {
     resetValidationState();
   }, [isConnected, resetValidationState]);
 
-  // Auto-stop session when user logs out.
-  // This prevents in-flight Firestore writes after the auth token is revoked,
-  // which would cause 'Missing or insufficient permissions' errors.
+  // Auto-stop session when user logs out (SAFE: guarded by stopSession)
+  // This prevents in-flight Firestore writes after auth token revoked
   useEffect(() => {
     if (!user && session.isRecording) {
-      console.log('[Pipeline] User logged out \u2013 stopping active session');
-      stopSession();
+      console.log('[Session Action] User logged out – stopping active session');
+      // Wrap in error boundary to prevent unhandled promise rejection crashes
+      stopSession().catch((err: any) => {
+        console.error('[Session Action] ❌ stopSession promise rejection on logout (contained):', err?.message || err);
+        // Force clear state as last resort
+        try {
+          setSession({
+            sessionId: null,
+            isRecording: false,
+            startedAt: null,
+            dataPointsSaved: 0,
+          });
+        } catch (stateErr) {
+          console.error('[Session Action] ❌ Final state clear failed:', stateErr);
+        }
+      });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]);
+  }, [user, session.isRecording, stopSession]);
 
   return {
     /** Latest parsed sensor values (live, in-memory) */

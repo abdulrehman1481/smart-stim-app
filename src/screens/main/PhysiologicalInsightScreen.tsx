@@ -49,8 +49,15 @@ function stressLabel(level: string): string {
   }
 }
 
-function finiteOr(value: number, fallback = 0): number {
+function finiteOr(value: number | null | undefined, fallback = 0): number {
+  // Explicitly handle null and undefined
+  if (value === null || value === undefined) return fallback;
   return Number.isFinite(value) ? value : fallback;
+}
+
+function safeFormat(val: number | null | undefined, decimals: number = 1): string {
+  if (val === null || val === undefined || Number.isNaN(val) || !Number.isFinite(val)) return '--';
+  return val.toFixed(decimals);
 }
 
 function isFresh(updatedAt: Date | null, maxAgeMs = 15_000): boolean {
@@ -158,11 +165,11 @@ function AxisRow({ label, x, y, z, unit, color }: { label: string; x: number; y:
             <View style={ax.track}>
               <View style={[ax.fill, { width: `${Math.min((Math.abs(val) / maxAbs) * 100, 100)}%`, backgroundColor: val >= 0 ? color : color + '88' }]} />
             </View>
-            <Text style={ax.val}>{val > 0 ? '+' : ''}{val} {unit}</Text>
+            <Text style={ax.val}>{val > 0 ? '+' : ''}{Math.round(val)} {unit}</Text>
           </View>
         );
       })}
-      <Text style={ax.mag}>|mag| = {mag.toFixed(0)} {unit}</Text>
+      <Text style={ax.mag}>|mag| = {Math.round(mag)} {unit}</Text>
     </View>
   );
 }
@@ -280,34 +287,37 @@ export default function PhysiologicalInsightScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ppgTs, selectedPanel]);
 
-  const ppgLive  = live.ppg.lastUpdated  !== null;
-  const tempLive = live.temperature.lastUpdated !== null;
-  const edaLive  = live.eda.lastUpdated  !== null;
-  const accelLive = live.accel.lastUpdated !== null;
-  const gyroLive  = live.gyro.lastUpdated !== null;
+  const ppgLive  = (live?.ppg?.lastUpdated ?? null) !== null;
+  const tempLive = (live?.temperature?.lastUpdated ?? null) !== null;
+  const edaLive  = (live?.eda?.lastUpdated ?? null) !== null;
+  const accelLive = (live?.accel?.lastUpdated ?? null) !== null;
+  const gyroLive  = (live?.gyro?.lastUpdated ?? null) !== null;
   const activeSensors = [ppgLive, tempLive, edaLive, accelLive, gyroLive].filter(Boolean).length;
   const bpmColor = !bpm ? '#94A3B8' : bpm < 60 ? '#3B82F6' : bpm > 100 ? '#EF4444' : '#10B981';
-  const safeTempC = finiteOr(live.temperature.tempC);
-  const safeTempF = finiteOr(live.temperature.tempF);
-  const safeEdaUS = finiteOr(live.eda.conductance_uS);
-  const safeEdaMv = finiteOr(live.eda.mv);
-  const safeEdaRaw = finiteOr(live.eda.rawADC);
-  const safePpgIr = finiteOr(live.ppg.ir);
-  const safePpgRed = finiteOr(live.ppg.red);
-  const safePpgGreen = finiteOr(live.ppg.green);
-  const safeAccelX = finiteOr(live.accel.x);
-  const safeAccelY = finiteOr(live.accel.y);
-  const safeAccelZ = finiteOr(live.accel.z);
-  const safeGyroX = finiteOr(live.gyro.x);
-  const safeGyroY = finiteOr(live.gyro.y);
-  const safeGyroZ = finiteOr(live.gyro.z);
+  const safeTempC = finiteOr(live?.temperature?.tempC);
+  const safeTempF = finiteOr(live?.temperature?.tempF);
+  const safeEdaUS = finiteOr(live?.eda?.conductance_uS);
+  const safeEdaMv = finiteOr(live?.eda?.mv);
+  const safeEdaRaw = finiteOr(live?.eda?.rawADC);
+  const safePpgIr = finiteOr(live?.ppg?.ir);
+  const safePpgRed = finiteOr(live?.ppg?.red);
+  const safePpgGreen = finiteOr(live?.ppg?.green);
+  const safeAccelX = finiteOr(live?.accel?.x);
+  const safeAccelY = finiteOr(live?.accel?.y);
+  const safeAccelZ = finiteOr(live?.accel?.z);
+  const safeGyroX = finiteOr(live?.gyro?.x);
+  const safeGyroY = finiteOr(live?.gyro?.y);
+  const safeGyroZ = finiteOr(live?.gyro?.z);
+  const safeRawGyroX = finiteOr(live?.gyro?.rawX);
+  const safeRawGyroY = finiteOr(live?.gyro?.rawY);
+  const safeRawGyroZ = finiteOr(live?.gyro?.rawZ);
   const tempCat  = tempLive ? tempCategory(safeTempC) : null;
   const summaryTiles = [
-    { key: 'temp', label: 'Temp', value: `${safeTempC.toFixed(2)} C`, live: isFresh(live.temperature.lastUpdated), color: '#F59E0B' },
-    { key: 'ppg', label: 'PPG-IR', value: safePpgIr.toLocaleString(), live: isFresh(live.ppg.lastUpdated), color: '#EF4444' },
-    { key: 'eda', label: 'EDA', value: `${safeEdaUS.toFixed(3)} uS`, live: isFresh(live.eda.lastUpdated), color: '#8B5CF6' },
-    { key: 'accel', label: 'Accel |mag|', value: `${finiteOr(live.accel.magnitude).toFixed(0)} mg`, live: isFresh(live.accel.lastUpdated), color: '#3B82F6' },
-    { key: 'gyro', label: 'Gyro |mag|', value: `${finiteOr(live.gyro.magnitude).toFixed(0)} mdps`, live: isFresh(live.gyro.lastUpdated), color: '#6366F1' },
+    { key: 'temp', label: 'Temp', value: `${safeFormat(safeTempC, 2)} C`, live: isFresh(live?.temperature?.lastUpdated ?? null), color: '#F59E0B' },
+    { key: 'ppg', label: 'PPG-IR', value: safePpgIr.toLocaleString(), live: isFresh(live?.ppg?.lastUpdated ?? null), color: '#EF4444' },
+    { key: 'eda', label: 'EDA', value: `${safeFormat(safeEdaUS, 3)} uS`, live: isFresh(live?.eda?.lastUpdated ?? null), color: '#8B5CF6' },
+    { key: 'accel', label: 'Accel |mag|', value: `${safeFormat(finiteOr(live?.accel?.magnitude), 5)} mg`, live: isFresh(live?.accel?.lastUpdated ?? null), color: '#3B82F6' },
+    { key: 'gyro', label: 'Gyro |mag|', value: `${Math.round(finiteOr(live?.gyro?.magnitude))} mdps`, live: isFresh(live?.gyro?.lastUpdated ?? null), color: '#6366F1' },
   ];
 
   return (
@@ -434,12 +444,12 @@ export default function PhysiologicalInsightScreen() {
             <>
               <View style={styles.hrRow}>
                 <View style={{ flex: 1 }}>
-                  <BigMetric value={safeTempC.toFixed(2)} unit=" °C" color="#B45309" />
-                  <Text style={styles.sub}>{safeTempF.toFixed(2)} °F</Text>
+                  <BigMetric value={safeFormat(safeTempC, 2)} unit=" °C" color="#B45309" />
+                  <Text style={styles.sub}>{safeFormat(safeTempF, 2)} °F</Text>
                 </View>
                 {tempCat && <MetricBadge label={tempCat.label} color={tempCat.color} />}
               </View>
-              <InfoBox text={`AS6221 · Updated ${live.temperature.lastUpdated!.toLocaleTimeString()} · Wrist skin normal: 33–36 °C`} />
+              <InfoBox text={`AS6221 · Updated ${live?.temperature?.lastUpdated ? live.temperature.lastUpdated.toLocaleTimeString() : '--'} · Wrist skin normal: 33–36 °C`} />
             </>
           ) : (
             <Text style={styles.waiting}>Waiting for AS6221 temperature sensor…</Text>
@@ -455,17 +465,17 @@ export default function PhysiologicalInsightScreen() {
             <>
               <View style={styles.hrRow}>
                 <View style={{ flex: 1 }}>
-                  <BigMetric value={safeEdaUS.toFixed(3)} unit=" µS" color="#6D28D9" />
-                  <Text style={styles.sub}>{safeEdaMv.toFixed(3)} mV · Raw ADC {safeEdaRaw}</Text>
+                  <BigMetric value={safeFormat(safeEdaUS, 3)} unit=" µS" color="#6D28D9" />
+                  <Text style={styles.sub}>{safeFormat(safeEdaMv, 3)} mV · Raw ADC {safeEdaRaw}</Text>
                 </View>
-                <View style={[styles.stressBadge, { backgroundColor: stressColor(live.eda.stressLevel) + '20', borderColor: stressColor(live.eda.stressLevel) }]}>
-                  <Text style={[styles.stressBadgeText, { color: stressColor(live.eda.stressLevel) }]}>
-                    {stressLabel(live.eda.stressLevel)}
+                <View style={[styles.stressBadge, { backgroundColor: stressColor(live?.eda?.stressLevel ?? 'LOW') + '20', borderColor: stressColor(live?.eda?.stressLevel ?? 'LOW') }]}>
+                  <Text style={[styles.stressBadgeText, { color: stressColor(live?.eda?.stressLevel ?? 'LOW') }]}> 
+                    {stressLabel(live?.eda?.stressLevel ?? 'LOW')}
                   </Text>
                 </View>
               </View>
               <View style={styles.conductanceBarWrap}>
-                <View style={[styles.conductanceBar, { width: `${Math.min(safeEdaUS * 10, 100)}%`, backgroundColor: stressColor(live.eda.stressLevel) }]} />
+                <View style={[styles.conductanceBar, { width: `${Math.min(safeEdaUS * 10, 100)}%`, backgroundColor: stressColor(live?.eda?.stressLevel ?? 'LOW') }]} />
               </View>
               <InfoBox text="ADS1113 · GSR electrodes on inner wrist · Sweat-gland conductance rises with arousal & stress" />
             </>
@@ -481,7 +491,7 @@ export default function PhysiologicalInsightScreen() {
           {accelLive ? (
             <>
               <AxisRow label="Accelerometer" x={safeAccelX} y={safeAccelY} z={safeAccelZ} unit="mg" color="#3B82F6" />
-              <InfoBox text={`LSM6DSO 6-axis IMU · Updated ${live.accel.lastUpdated!.toLocaleTimeString()}`} />
+              <InfoBox text={`LSM6DSO 6-axis IMU · Updated ${live?.accel?.lastUpdated ? live.accel.lastUpdated.toLocaleTimeString() : '--'}`} />
             </>
           ) : (
             <Text style={styles.waiting}>Waiting for LSM6DSO accelerometer…</Text>
@@ -494,8 +504,9 @@ export default function PhysiologicalInsightScreen() {
         {selectedPanel === 'gyro' && <SensorCard accent="#6366F1" icon="navigate" title="Angular Velocity" isLive={gyroLive}>
           {gyroLive ? (
             <>
-              <AxisRow label="Gyroscope" x={safeGyroX} y={safeGyroY} z={safeGyroZ} unit="mdps" color="#6366F1" />
-              <InfoBox text={`LSM6DSO 6-axis IMU · Updated ${live.gyro.lastUpdated!.toLocaleTimeString()}`} />
+              <AxisRow label="Gyroscope (Stabilized)" x={safeGyroX} y={safeGyroY} z={safeGyroZ} unit="mdps" color="#6366F1" />
+              <AxisRow label="Gyroscope (Raw)" x={safeRawGyroX} y={safeRawGyroY} z={safeRawGyroZ} unit="mdps" color="#4338CA" fullScale={60000} />
+              <InfoBox text={`LSM6DSO 6-axis IMU · Raw values match Python GUI log format · Updated ${live?.gyro?.lastUpdated ? live.gyro.lastUpdated.toLocaleTimeString() : '--'}`} />
             </>
           ) : (
             <Text style={styles.waiting}>Waiting for LSM6DSO gyroscope…</Text>

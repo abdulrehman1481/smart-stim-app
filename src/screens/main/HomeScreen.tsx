@@ -26,7 +26,10 @@ export default function HomeScreen() {
   const { user, logout } = useAuth();
   const { live, session, startSession, stopSession } = useSharedSensorPipeline();
 
-  const safe = (value: number, fallback = 0) => (Number.isFinite(value) ? value : fallback);
+  const safe = (value: number | null | undefined, fallback = 0) => {
+    if (value === null || value === undefined) return fallback;
+    return Number.isFinite(value) ? value : fallback;
+  };
 
   const hasFresh = (updatedAt: Date | null) => {
     if (!updatedAt) return false;
@@ -69,8 +72,12 @@ export default function HomeScreen() {
       {
         text: 'Disconnect', style: 'destructive',
         onPress: async () => {
-          if (session.isRecording) await stopSession();
-          await disconnectDevice();
+          try {
+            if (session.isRecording) await stopSession();
+            await disconnectDevice();
+          } catch (e) {
+            console.log('[UI] Safe catch during manual disconnect', e);
+          }
         },
       },
     ]);
@@ -78,42 +85,47 @@ export default function HomeScreen() {
 
   const handleStopSession = async () => { await stopSession(); loadSessions(); };
 
+  const safeFormat = (val: number | null | undefined, decimals: number = 1): string => {
+    if (val === null || val === undefined || !Number.isFinite(val)) return '--';
+    return val.toFixed(decimals);
+  };
+
   const getSensorCards = () => [
     {
       icon: 'thermometer',
-      value: hasFresh(live.temperature.lastUpdated) ? `${safe(live.temperature.tempC).toFixed(1)}°C` : '---',
+      value: hasFresh(live?.temperature?.lastUpdated ?? null) ? `${safeFormat(safe(live?.temperature?.tempC), 1)}°C` : '---',
       label: 'Temp',
-      active: hasFresh(live.temperature.lastUpdated),
+      active: hasFresh(live?.temperature?.lastUpdated ?? null),
     },
     {
       icon: 'heart',
-      value: hasFresh(live.ppg.lastUpdated) ? `${Math.round(safe(live.ppg.ir)).toLocaleString()}` : '---',
+      value: hasFresh(live?.ppg?.lastUpdated ?? null) ? `${Math.round(safe(live?.ppg?.ir)).toLocaleString()}` : '---',
       label: 'PPG-IR',
-      active: hasFresh(live.ppg.lastUpdated),
+      active: hasFresh(live?.ppg?.lastUpdated ?? null),
     },
     {
       icon: 'flash',
-      value: hasFresh(live.eda.lastUpdated) ? `${safe(live.eda.conductance_uS).toFixed(2)}µS` : '---',
+      value: hasFresh(live?.eda?.lastUpdated ?? null) ? `${safeFormat(safe(live?.eda?.conductance_uS), 2)}µS` : '---',
       label: 'EDA',
-      active: hasFresh(live.eda.lastUpdated),
+      active: hasFresh(live?.eda?.lastUpdated ?? null),
     },
     {
       icon: 'speedometer',
-      value: hasFresh(live.accel.lastUpdated) ? `${safe(live.accel.magnitude).toFixed(0)}mg` : '---',
+      value: hasFresh(live?.accel?.lastUpdated ?? null) ? `${safeFormat(safe(live?.accel?.magnitude), 3)}mg` : '---',
       label: 'Accel',
-      active: hasFresh(live.accel.lastUpdated),
+      active: hasFresh(live?.accel?.lastUpdated ?? null),
     },
     {
       icon: 'navigate',
-      value: hasFresh(live.gyro.lastUpdated) ? `${safe(live.gyro.magnitude).toFixed(0)}mdps` : '---',
+      value: hasFresh(live?.gyro?.lastUpdated ?? null) ? `${safeFormat(safe(live?.gyro?.magnitude), 3)}mdps` : '---',
       label: 'Gyro',
-      active: hasFresh(live.gyro.lastUpdated),
+      active: hasFresh(live?.gyro?.lastUpdated ?? null),
     },
     {
       icon: 'pulse',
-      value: hasFresh(live.eda.lastUpdated) ? live.eda.stressLevel : '---',
+      value: hasFresh(live?.eda?.lastUpdated ?? null) ? (live?.eda?.stressLevel ?? '---') : '---',
       label: 'Stress',
-      active: hasFresh(live.eda.lastUpdated),
+      active: hasFresh(live?.eda?.lastUpdated ?? null),
     },
   ];
 

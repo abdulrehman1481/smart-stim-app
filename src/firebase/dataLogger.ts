@@ -86,6 +86,25 @@ const getSensorCollectionPath = (sensorType: SensorType): string => {
 };
 
 /**
+ * FIRESTORE SAFETY FILTER: Prevents NaN/Infinity from crashing Firebase writes
+ * 
+ * When the user touches the EDA sensor or sensors spike from noise, hardware can emit NaN or Infinity.
+ * Firebase hard-crashes if these values are written to the database.
+ * 
+ * This function sanitizes all numeric values:
+ * - Returns null for non-finite numbers (NaN, Infinity, -Infinity)
+ * - Returns null for undefined/null
+ * - Returns the number as-is if finite
+ * 
+ * Usage: safeNum(value) instead of just value
+ */
+const safeNum = (val: any): number | null => {
+  if (val === null || val === undefined) return null;
+  if (typeof val === 'number' && !Number.isFinite(val)) return null; // Destroys NaN and Infinity
+  return val;
+};
+
+/**
  * Calculate data quality based on sensor readings
  */
 const calculateDataQuality = (reading: any): DataQuality => {
@@ -104,11 +123,248 @@ const stripUndefined = <T extends object>(obj: T): Partial<T> =>
   ) as Partial<T>;
 
 // ============================================================================
+// FIREBASE WRITE BATCHING SYSTEM
+// ============================================================================
+// Batches all sensor writes to reduce from 200+/sec to ~60-100 per batch
+// Performs batch writes every 3 seconds using writeBatch() API
+// CRITICAL: Implements 1Hz throttling + 500-operation batch limit
+
+interface FirebaseQueuedWrite {
+  userId: string;
+  collectionPath: string;  // e.g., 'sensor_data/eda/readings'
+  data: any;  // The reading data with timestamp
+}
+
+interface BatchWriteStats {
+  totalWrites: number;
+  byType: Record<string, number>;
+}
+
+// Module-level queue for batching writes
+let firebaseWriteQueue: FirebaseQueuedWrite[] = [];
+let batchProcessorInterval: NodeJS.Timeout | null = null;
+
+/**
+ * THROTTLING MECHANISM: Track last write timestamp per sensor type
+ * Ensures we only write 1 sample per second per sensor (1Hz downsampling)
+ * Key format: "userId:sensorType" (e.g., "user123:ppg", "user123:imu")
+ * 
+ * HIGH-FREQUENCY SENSORS (1Hz throttling to reduce Firestore writes by 99%):
+ *   - PPG (200Hz firmware → 1Hz writes)
+ *   - IMU: accel/gyro (200Hz firmware → 1Hz writes)
+ * 
+ * OTHER SENSORS (use existing FB_MIN_INTERVAL_MS throttling):
+ *   - Temperature (every 5s)
+ *   - EDA (every 3s)
+ */
+const lastWriteTimestamp = new Map<string, number>();
+const lastPPGWrite = new Map<string, number>();
+const lastIMUWrite = new Map<string, number>();
+
+/**
+ * Check if we should throttle this sensor write
+ * Returns true if >1 second has passed since last write for this sensor
+ * Returns false if <1 second (drop this frame)
+ */
+const shouldThrottleWrite = (userId: string, sensorType: string): boolean => {
+  const key = `${userId}:${sensorType}`;
+  const now = Date.now();
+  const lastWrite = lastWriteTimestamp.get(key) || 0;
+  
+  // Only write if 1+ second has passed since last write
+  if (now - lastWrite >= 1000) {
+    lastWriteTimestamp.set(key, now);
+    return false; // Don't throttle, write this one
+  }
+  
+  return true; // Throttle, skip this one
+};
+
+/**
+ * Start the Firebase batch processor
+ * Runs every 3 seconds, drains all queued writes using writeBatch()
+ * Logs once per batch instead of per-write
+ */
+export const startFirebaseWriteBatcher = (): void => {
+  if (batchProcessorInterval) {
+    console.warn('[Firebase] ⚠️ Batch processor already running');
+    return;
+  }
+
+  batchProcessorInterval = setInterval(async () => {
+    if (firebaseWriteQueue.length === 0) {
+      return;  // Skip if queue is empty
+    }
+
+    const queueToProcess = [...firebaseWriteQueue];
+    firebaseWriteQueue = [];  // Clear queue immediately
+
+    try {
+      // Group writes by user for atomic batching
+      const writesByUser = new Map<string, FirebaseQueuedWrite[]>();
+      for (const write of queueToProcess) {
+        if (!writesByUser.has(write.userId)) {
+          writesByUser.set(write.userId, []);
+        }
+        writesByUser.get(write.userId)!.push(write);
+      }
+
+      // Process each user's writes atomically
+      const stats: BatchWriteStats = {
+        totalWrites: 0,
+        byType: {},
+      };
+
+      for (const [userId, writes] of writesByUser) {
+        // CRITICAL: Chunk writes to never exceed 500 operations per batch
+        // Use 450 as max to stay safely under the 500 limit
+        const MAX_BATCH_SIZE = 450;
+        
+        for (let i = 0; i < writes.length; i += MAX_BATCH_SIZE) {
+          const chunk = writes.slice(i, i + MAX_BATCH_SIZE);
+          const batch = writeBatch(db);
+
+          for (const write of chunk) {
+            const collectionRef = collection(db, 'users', userId, ...write.collectionPath.split('/'));
+            const docRef = doc(collectionRef);
+            batch.set(docRef, write.data);
+
+            // Track stats
+            stats.totalWrites++;
+            const sensorType = write.collectionPath.split('/')[1] || 'unknown';
+            stats.byType[sensorType] = (stats.byType[sensorType] || 0) + 1;
+          }
+
+          await batch.commit();
+        }
+      }
+
+      // Log batch results once (not per-write)
+      const typeBreakdown = Object.entries(stats.byType)
+        .map(([type, count]) => `${type}: ${count}`)
+        .join(', ');
+      // Batch committed successfully
+    } catch (error) {
+      console.error('[Firebase] ❌ Batch write failed:', error);
+      // Put failed writes back in queue for retry
+      firebaseWriteQueue.unshift(...queueToProcess);
+    }
+  }, 3000);  // Process every 3 seconds
+
+  // Batch processor started
+};
+
+/**
+ * Stop the Firebase batch processor
+ * Useful for cleanup or switching modes
+ */
+export const stopFirebaseWriteBatcher = (): void => {
+  if (batchProcessorInterval) {
+    clearInterval(batchProcessorInterval);
+    batchProcessorInterval = null;
+    // Batch processor stopped
+  }
+};
+
+/**
+ * Stop the data logger and safely flush remaining data
+ * TEARDOWN DIAGNOSTICS: Catches any errors during final flush
+ * Called during app unmount or session cleanup
+ */
+export const stopDataLogger = (userId?: string): void => {
+  try {
+    // Stop the batch processor interval FIRST
+    stopFirebaseWriteBatcher();
+  } catch (stopErr) {
+    console.warn('[Firebase] Error stopping batcher (ignored):', stopErr);
+  }
+  
+  // Only attempt flush if we have valid data structures
+  try {
+    if (userId && firebaseWriteQueue && Array.isArray(firebaseWriteQueue) && firebaseWriteQueue.length > 0) {
+      flushFirebaseWriteQueue().catch(err => {
+        console.warn('[Firebase] Final flush error (contained):', err?.message);
+        // Error is contained, app won't crash
+      });
+    }
+  } catch (flushErr) {
+    console.warn('[Firebase] Error in final flush (contained):', flushErr);
+  }
+};
+
+/**
+ * Immediately flush the write queue and wait for completion
+ * CRITICAL: Implements 500-operation batch limit and robust error isolation
+ * Useful for graceful shutdown or before important operations
+ * 
+ * SAFETY: Wrapped in try/catch to prevent Firebase errors from crashing BLE pipeline or UI
+ */
+export const flushFirebaseWriteQueue = async (): Promise<void> => {
+  console.log('[Teardown Diagnostic] flushFirebaseWriteQueue called. Items in queue:', firebaseWriteQueue.length);
+  
+  if (!firebaseWriteQueue || firebaseWriteQueue.length === 0) {
+    console.log('[Teardown Diagnostic] Queue is empty, skipping Firebase commit.');
+    return;
+  }
+
+  const queueToProcess = [...firebaseWriteQueue];
+  firebaseWriteQueue = [];  // Clear queue immediately to prevent double-processing
+
+  try {
+    // Group writes by user for atomic batching
+    const writesByUser = new Map<string, FirebaseQueuedWrite[]>();
+    for (const write of queueToProcess) {
+      if (!writesByUser.has(write.userId)) {
+        writesByUser.set(write.userId, []);
+      }
+      writesByUser.get(write.userId)!.push(write);
+    }
+
+    let totalWrites = 0;
+    let batchCount = 0;
+
+    // CRITICAL: Process each user's writes with 500-operation limit per batch
+    for (const [userId, writes] of writesByUser) {
+      // HARD LIMIT: Never exceed 500 operations per writeBatch()
+      // Using 450 as safe margin to guarantee we stay under the hard limit
+      const MAX_BATCH_SIZE = 450;
+      
+      for (let i = 0; i < writes.length; i += MAX_BATCH_SIZE) {
+        const chunk = writes.slice(i, i + MAX_BATCH_SIZE);
+        
+        try {
+          const batch = writeBatch(db);
+          
+          for (const write of chunk) {
+            const collectionRef = collection(db, 'users', userId, ...write.collectionPath.split('/'));
+            const docRef = doc(collectionRef);
+            batch.set(docRef, write.data);
+            totalWrites++;
+          }
+
+          await batch.commit();
+          batchCount++;
+        } catch (batchError: any) {
+          // Continue processing other batches even if one fails
+          // Don't re-queue — we already cleared the main queue
+        }
+      }
+    }
+  } catch (error: any) {
+    // ISOLATION: Catch any top-level errors to prevent Firebase failures from crashing the app
+    // Clear queue to prevent infinite retry loop
+    // Do NOT rethrow — this error must be contained
+  }
+};
+
+
+// ============================================================================
 // EDA/GSR SENSOR FUNCTIONS
 // ============================================================================
 
 /**
  * Save EDA/GSR reading from ADS1113 sensor
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
  * 
  * @example
  * await saveEDAReading(user.uid, {
@@ -125,22 +381,32 @@ export const saveEDAReading = async (
 ): Promise<void> => {
   try {
     const reading: EDAReading = {
-      ...data,
-      sensorType: SensorType.EDA,
-      timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
+      rawValue:    safeNum(data.rawValue) ?? null,
+      voltage:     safeNum(data.voltage) ?? null,
+      resistance:  safeNum(data.resistance) ?? null,
+      conductance: safeNum(data.conductance) ?? null,
+      stressLevel: data.stressLevel ?? null,
+      deviceId:    data.deviceId ?? null,
+      deviceName:  data.deviceName ?? null,
+      sessionId:   data.sessionId ?? null,
+      quality:     data.quality ?? calculateDataQuality(data),
+      sensorType:  SensorType.EDA,
+      timestamp:   serverTimestamp() as Timestamp,
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'eda', 'readings'), reading);
-    
-    // Update session data point count if sessionId provided
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/eda/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'eda');
     }
-    
-    console.log('[Firebase] ✅ Saved EDA reading');
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save EDA reading:', error);
+    console.error('[Firebase] ❌ Failed to queue EDA reading:', error);
     throw error;
   }
 };
@@ -151,6 +417,7 @@ export const saveEDAReading = async (
 
 /**
  * Save temperature reading from AS6221 sensor
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
  * 
  * @example
  * await saveTemperatureReading(user.uid, {
@@ -166,21 +433,31 @@ export const saveTemperatureReading = async (
 ): Promise<void> => {
   try {
     const reading: TemperatureReading = {
-      ...data,
-      sensorType: SensorType.TEMPERATURE,
-      timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
+      temperature:            safeNum(data.temperature) ?? null,
+      temperatureFahrenheit:  safeNum(data.temperatureFahrenheit) ?? null,
+      bodyLocation:           data.bodyLocation ?? null,
+      skinContact:            data.skinContact ?? null,
+      deviceId:               data.deviceId ?? null,
+      deviceName:             data.deviceName ?? null,
+      sessionId:              data.sessionId ?? null,
+      quality:                data.quality ?? calculateDataQuality(data),
+      sensorType:             SensorType.TEMPERATURE,
+      timestamp:              serverTimestamp() as Timestamp,
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'temperature', 'readings'), reading);
-    
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/temperature/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'temperature');
     }
-    
-    console.log('[Firebase] ✅ Saved temperature reading:', data.temperature, '°C');
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save temperature reading:', error);
+    console.error('[Firebase] ❌ Failed to queue temperature reading:', error);
     throw error;
   }
 };
@@ -191,6 +468,8 @@ export const saveTemperatureReading = async (
 
 /**
  * Save PPG reading from MAX30101 sensor
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
+ * THROTTLED: 1Hz downsampling — only saves 1 reading/second per PPG channel
  * 
  * @example
  * await savePPGReading(user.uid, {
@@ -220,28 +499,46 @@ export const savePPGReading = async (
         sensorType = SensorType.PPG_IR;
     }
 
+    // THROTTLING: 1Hz downsampling for high-frequency raw data
+    // At 100 Hz PPG, this drops 99 out of every 100 frames, keeping only 1/sec
+    if (shouldThrottleWrite(userId, 'ppg')) {
+      // Frame throttled, skip this one
+      return;
+    }
+
     const reading: PPGReading = {
-      ...data,
-      sensorType,
-      timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
+      channel:          data.channel ?? null,
+      rawValue:         safeNum(data.rawValue) ?? null,
+      signalQuality:    safeNum(data.signalQuality) ?? null,
+      skinContact:      data.skinContact ?? null,
+      deviceId:         data.deviceId ?? null,
+      deviceName:       data.deviceName ?? null,
+      sessionId:        data.sessionId ?? null,
+      quality:          data.quality ?? calculateDataQuality(data),
+      sensorType:       sensorType,
+      timestamp:        serverTimestamp() as Timestamp,
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'ppg', 'readings'), reading);
-    
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/ppg/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'ppg');
     }
-    
-    console.log('[Firebase] ✅ Saved PPG reading:', data.channel);
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save PPG reading:', error);
+    console.error('[Firebase] ❌ Failed to queue PPG reading:', error);
     throw error;
   }
 };
 
 /**
  * Save heart rate reading derived from PPG
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
  * 
  * @example
  * await saveHeartRateReading(user.uid, {
@@ -264,21 +561,26 @@ export const saveHeartRateReading = async (
       quality: data.quality || calculateDataQuality(data),
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'heart_rate', 'readings'), reading);
-    
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/heart_rate/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'heartRate');
     }
-    
-    console.log('[Firebase] ✅ Saved heart rate:', data.heartRate, 'BPM');
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save heart rate reading:', error);
+    console.error('[Firebase] ❌ Failed to queue heart rate reading:', error);
     throw error;
   }
 };
 
 /**
  * Save SpO2 reading from MAX30101
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
  * 
  * @example
  * await saveSpO2Reading(user.uid, {
@@ -301,15 +603,19 @@ export const saveSpO2Reading = async (
       quality: data.quality || calculateDataQuality(data),
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'spo2', 'readings'), reading);
-    
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/spo2/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'spo2');
     }
-    
-    console.log('[Firebase] ✅ Saved SpO2:', data.spO2, '%');
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save SpO2 reading:', error);
+    console.error('[Firebase] ❌ Failed to queue SpO2 reading:', error);
     throw error;
   }
 };
@@ -320,6 +626,8 @@ export const saveSpO2Reading = async (
 
 /**
  * Save accelerometer reading from LSM6DSO
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
+ * THROTTLED: 1Hz downsampling — only saves 1 reading/second per IMU
  * 
  * @example
  * await saveAccelerometerReading(user.uid, {
@@ -334,29 +642,50 @@ export const saveAccelerometerReading = async (
   data: Omit<AccelerometerReading, 'timestamp' | 'sensorType'>
 ): Promise<void> => {
   try {
+    // THROTTLING: 1Hz downsampling for high-frequency raw data
+    // At 104 Hz IMU, this drops 103 out of every 104 frames, keeping only 1/sec
+    if (shouldThrottleWrite(userId, 'imu')) {
+      // Frame throttled, skip this one
+      return;
+    }
+
     const reading: AccelerometerReading = {
-      ...data,
-      sensorType: SensorType.ACCELEROMETER,
-      timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
-      magnitude: data.magnitude || Math.sqrt(data.x ** 2 + data.y ** 2 + data.z ** 2),
+      x:           safeNum(data.x) ?? null,
+      y:           safeNum(data.y) ?? null,
+      z:           safeNum(data.z) ?? null,
+      rawX:        safeNum(data.rawX) ?? null,
+      rawY:        safeNum(data.rawY) ?? null,
+      rawZ:        safeNum(data.rawZ) ?? null,
+      magnitude:   safeNum(data.magnitude ?? (Math.sqrt((data.x ?? 0) ** 2 + (data.y ?? 0) ** 2 + (data.z ?? 0) ** 2))),
+      deviceId:    data.deviceId ?? null,
+      deviceName:  data.deviceName ?? null,
+      sessionId:   data.sessionId ?? null,
+      quality:     data.quality ?? calculateDataQuality(data),
+      sensorType:  SensorType.ACCELEROMETER,
+      timestamp:   serverTimestamp() as Timestamp,
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'accelerometer', 'readings'), reading);
-    
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/accelerometer/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'accelerometer');
     }
-    
-    console.log('[Firebase] ✅ Saved accelerometer reading');
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save accelerometer reading:', error);
+    console.error('[Firebase] ❌ Failed to queue accelerometer reading:', error);
     throw error;
   }
 };
 
 /**
  * Save gyroscope reading from LSM6DSO
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
+ * THROTTLED: 1Hz downsampling — only saves 1 reading/second per IMU
  * 
  * @example
  * await saveGyroscopeReading(user.uid, {
@@ -371,29 +700,50 @@ export const saveGyroscopeReading = async (
   data: Omit<GyroscopeReading, 'timestamp' | 'sensorType'>
 ): Promise<void> => {
   try {
+    // THROTTLING: 1Hz downsampling for high-frequency raw data
+    // At 104 Hz IMU, this drops 103 out of every 104 frames, keeping only 1/sec
+    if (shouldThrottleWrite(userId, 'imu')) {
+      // Frame throttled, skip this one
+      return;
+    }
+
     const reading: GyroscopeReading = {
-      ...data,
-      sensorType: SensorType.GYROSCOPE,
-      timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
-      magnitude: data.magnitude || Math.sqrt(data.x ** 2 + data.y ** 2 + data.z ** 2),
+      x:           safeNum(data.x) ?? null,
+      y:           safeNum(data.y) ?? null,
+      z:           safeNum(data.z) ?? null,
+      rawX:        safeNum(data.rawX) ?? null,
+      rawY:        safeNum(data.rawY) ?? null,
+      rawZ:        safeNum(data.rawZ) ?? null,
+      magnitude:   safeNum(data.magnitude ?? (Math.sqrt((data.x ?? 0) ** 2 + (data.y ?? 0) ** 2 + (data.z ?? 0) ** 2))),
+      deviceId:    data.deviceId ?? null,
+      deviceName:  data.deviceName ?? null,
+      sessionId:   data.sessionId ?? null,
+      quality:     data.quality ?? calculateDataQuality(data),
+      sensorType:  SensorType.GYROSCOPE,
+      timestamp:   serverTimestamp() as Timestamp,
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'gyroscope', 'readings'), reading);
-    
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/gyroscope/readings',
+      data: reading,
+    });
+
+    // Update session data point count immediately (lightweight operation)
     if (data.sessionId) {
       await updateSessionDataCount(userId, data.sessionId, 'gyroscope');
     }
-    
-    console.log('[Firebase] ✅ Saved gyroscope reading');
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save gyroscope reading:', error);
+    console.error('[Firebase] ❌ Failed to queue gyroscope reading:', error);
     throw error;
   }
 };
 
 /**
  * Save combined IMU reading (accelerometer + gyroscope)
+ * NOTE: Queued for batch processing (writes every 3 seconds, not immediately)
+ * THROTTLED: 1Hz downsampling — only saves 1 reading/second per IMU
  * 
  * @example
  * await saveIMUReading(user.uid, {
@@ -407,17 +757,42 @@ export const saveIMUReading = async (
   data: Omit<IMUReading, 'timestamp'>
 ): Promise<void> => {
   try {
+    // THROTTLING: 1Hz downsampling for high-frequency raw data
+    // At 104 Hz IMU, this drops 103 out of every 104 frames, keeping only 1/sec
+    if (shouldThrottleWrite(userId, 'imu')) {
+      // Frame throttled, skip this one
+      return;
+    }
+
     const reading: IMUReading = {
-      ...data,
-      timestamp: serverTimestamp() as Timestamp,
-      quality: data.quality || calculateDataQuality(data),
+      accelerometer: {
+        x:         safeNum(data.accelerometer?.x) ?? null,
+        y:         safeNum(data.accelerometer?.y) ?? null,
+        z:         safeNum(data.accelerometer?.z) ?? null,
+        magnitude: safeNum(data.accelerometer?.magnitude) ?? null,
+      },
+      gyroscope: {
+        x:         safeNum(data.gyroscope?.x) ?? null,
+        y:         safeNum(data.gyroscope?.y) ?? null,
+        z:         safeNum(data.gyroscope?.z) ?? null,
+        magnitude: safeNum(data.gyroscope?.magnitude) ?? null,
+      },
+      activity:   data.activity ?? null,
+      deviceId:   data.deviceId ?? null,
+      deviceName: data.deviceName ?? null,
+      sessionId:  data.sessionId ?? null,
+      quality:    data.quality ?? calculateDataQuality(data),
+      timestamp:  serverTimestamp() as Timestamp,
     };
 
-    await addDoc(collection(db, 'users', userId, 'sensor_data', 'imu', 'readings'), reading);
-    
-    console.log('[Firebase] ✅ Saved IMU reading');
+    // Queue for batch processing instead of immediate write
+    firebaseWriteQueue.push({
+      userId,
+      collectionPath: 'sensor_data/imu/readings',
+      data: reading,
+    });
   } catch (error) {
-    console.error('[Firebase] ❌ Failed to save IMU reading:', error);
+    console.error('[Firebase] ❌ Failed to queue IMU reading:', error);
     throw error;
   }
 };

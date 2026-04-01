@@ -82,11 +82,11 @@ export const GyroscopeCard = React.memo(({ x, y, z }: GyroscopeCardProps) => {
     <View style={styles.card}>
       <Text style={styles.label}>Gyroscope</Text>
       <View style={styles.gyroValues}>
-        <Text style={styles.gyroAxis}>X: {x.toFixed(2)}°/s</Text>
-        <Text style={styles.gyroAxis}>Y: {y.toFixed(2)}°/s</Text>
-        <Text style={styles.gyroAxis}>Z: {z.toFixed(2)}°/s</Text>
+        <Text style={styles.gyroAxis}>X: {Math.round(x)} mdps</Text>
+        <Text style={styles.gyroAxis}>Y: {Math.round(y)} mdps</Text>
+        <Text style={styles.gyroAxis}>Z: {Math.round(z)} mdps</Text>
       </View>
-      <Text style={styles.gyroMagnitude}>Magnitude: {magnitude.toFixed(2)}g</Text>
+      <Text style={styles.gyroMagnitude}>Magnitude: {Math.round(magnitude)} mdps</Text>
     </View>
   );
 });

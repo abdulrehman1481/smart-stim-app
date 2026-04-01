@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import type { Auth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Replaced with project-provided Firebase configuration
 const firebaseConfig = {
@@ -15,7 +16,41 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-export const auth = getAuth(app);
+// Keep auth session persisted across app restarts on React Native.
+// If auth was already initialized elsewhere (e.g., hot reload), fallback to getAuth.
+export const auth: Auth = (() => {
+  let authModule: any;
+  try {
+    // Prefer dedicated React Native auth runtime.
+    authModule = require("firebase/auth/react-native");
+  } catch {
+    // Fallback for environments that only expose firebase/auth.
+    authModule = require("firebase/auth");
+  }
+
+  const getAuth = authModule?.getAuth;
+  const initializeAuth = authModule?.initializeAuth;
+  const getReactNativePersistence = authModule?.getReactNativePersistence;
+
+  try {
+    if (typeof getAuth !== "function" || typeof initializeAuth !== "function") {
+      throw new Error("firebase auth module missing getAuth/initializeAuth");
+    }
+
+    if (typeof getReactNativePersistence !== "function") {
+      throw new Error("getReactNativePersistence unavailable in active auth module");
+    }
+
+    const instance = initializeAuth(app, {
+      persistence: getReactNativePersistence(AsyncStorage),
+    });
+    console.log("[FirebaseAuth] RN persistence enabled");
+    return instance;
+  } catch (err: any) {
+    console.warn("[FirebaseAuth] Persistent RN auth init failed; using fallback getAuth (may be non-persistent):", err?.message || err);
+    return getAuth(app);
+  }
+})();
 
 export const db = getFirestore(app);
 

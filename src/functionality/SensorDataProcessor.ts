@@ -499,6 +499,218 @@ export function enforceBufferLimit<T>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 8. ROLLING AVERAGE WITH SPIKE DETECTION (Heart Rate Smoothing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Heart Rate Rolling Average: smooths PPG data and rejects spikes.
+ * 
+ * Strategy:
+ *   - Keep buffer of last 5 HR samples
+ *   - Compare incoming value to rolling average
+ *   - If value is >30% away from average, discard it as a spike
+ *   - Return smoothed HR value or previous if rejected
+ * 
+ * Why this works:
+ *   - Normal HR changes: ±1-5 bpm per sample (tiny, <1%)
+ *   - Electromagnetic noise: sudden jump 70→200 bpm (>100%)
+ *   - 30% threshold catches noise while allowing normal exercise response
+ * 
+ * Usage:
+ *   const hrFilter = new RollingAverageFilter(5, 0.30);
+ *   const cleanHR = hrFilter.update(rawHRfromPPG);
+ */
+export class RollingAverageFilter {
+  private buffer: number[] = [];
+  private lastValidValue: number = 0;
+  private hasValue: boolean = false;
+
+  /**
+   * @param bufferSize - Number of samples to average (default 5 for smooth motion detection)
+   * @param spikeThreshold - Reject values >threshold % away from average (default 0.30 = 30%)
+   */
+  constructor(
+    private bufferSize: number = 5,
+    private spikeThreshold: number = 0.30
+  ) {}
+
+  /**
+   * Process new value: update buffer, detect spikes, return smoothed value.
+   * 
+   * @returns Smoothed value (either new value averaged, or previous if rejected)
+   */
+  update(newValue: number): number {
+    // Safety: reject non-finite values
+    if (!Number.isFinite(newValue)) {
+      return this.lastValidValue;
+    }
+
+    // Initialize first valid value
+    if (!this.hasValue) {
+      this.lastValidValue = newValue;
+      this.buffer = [newValue];
+      this.hasValue = true;
+      return newValue;
+    }
+
+    // Calculate current average before adding new value
+    const currentAvg =
+      this.buffer.length > 0
+        ? this.buffer.reduce((a, b) => a + b, 0) / this.buffer.length
+        : this.lastValidValue;
+
+    // Detect spike: is new value too far from current average?
+    const percentDelta = Math.abs(newValue - currentAvg) / (currentAvg || 1);
+    if (percentDelta > this.spikeThreshold) {
+      // Spike detected, reject and return last valid value
+      return this.lastValidValue;
+    }
+
+    // Valid value: add to buffer
+    this.buffer.push(newValue);
+    if (this.buffer.length > this.bufferSize) {
+      this.buffer.shift(); // Remove oldest to maintain fixed size
+    }
+
+    // Calculate new smoothed average
+    const smoothedValue = this.buffer.reduce((a, b) => a + b, 0) / this.buffer.length;
+    this.lastValidValue = smoothedValue;
+
+    return smoothedValue;
+  }
+
+  /**
+   * Get statistics about filtering.
+   */
+  getStats(): {
+    bufferSize: number;
+    currentAverage: number;
+    bufferValues: number[];
+  } {
+    const avg =
+      this.buffer.length > 0
+        ? this.buffer.reduce((a, b) => a + b, 0) / this.buffer.length
+        : 0;
+    return {
+      bufferSize: this.buffer.length,
+      currentAverage: avg,
+      bufferValues: [...this.buffer],
+    };
+  }
+
+  /**
+   * Reset filter (useful for new session or sensor reconnect).
+   */
+  reset(): void {
+    this.buffer = [];
+    this.lastValidValue = 0;
+    this.hasValue = false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. IMU VALIDATION (Crash Prevention)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * IMU Data: All 6 fields from LSM6DSO (accel + gyro).
+ */
+export interface IMUData {
+  ax_mg: number;
+  ay_mg: number;
+  az_mg: number;
+  gx_mdps: number;
+  gy_mdps: number;
+  gz_mdps: number;
+}
+
+/**
+ * Validate and parse IMU data: Ensure all 6 fields are finite numbers.
+ * 
+ * This is the "Garbage Disposal" for IMU data:
+ *   - Validates each field independently
+ *   - Returns null if ANY field is NaN, Infinity, or missing
+ *   - Prevents partial objects from corrupting state
+ * 
+ * The Problem:
+ *   If even one field is NaN, it can propagate through calculations:
+ *   - magnitude = sqrt(NaN² + 50² + 50²) = NaN
+ *   - isMotionDetected(NaN) returns false (breaks motion detection)
+ *   - State updates with NaN → UI renders "NaN" or crashes
+ * 
+ * The Solution:
+ *   Validate all 6 before accepting ANY value.
+ *   Return null instead of partial object.
+ *   Caller decides what to do (reject packet, use previous, etc.)
+ * 
+ * Usage:
+ *   const parsed = { ax_mg: 123, ay_mg: 45, az_mg: 92, gx_mdps: 10, gy_mdps: -5, gz_mdps: 8 };
+ *   const valid = parseAndValidateIMU(parsed);
+ *   if (valid) {
+ *     updateState(valid);  ← safe, all fields verified
+ *   }
+ */
+export function parseAndValidateIMU(data: any): IMUData | null {
+  try {
+    // Extract fields
+    const ax_mg = parseFloat(data.ax_mg);
+    const ay_mg = parseFloat(data.ay_mg);
+    const az_mg = parseFloat(data.az_mg);
+    const gx_mdps = parseFloat(data.gx_mdps);
+    const gy_mdps = parseFloat(data.gy_mdps);
+    const gz_mdps = parseFloat(data.gz_mdps);
+
+    // CRASH PREVENTION: Validate all 6 fields
+    // If ANY field is NaN or Infinity, reject entire packet
+    const allFields = [ax_mg, ay_mg, az_mg, gx_mdps, gy_mdps, gz_mdps];
+    for (const field of allFields) {
+      if (!Number.isFinite(field)) {
+        console.warn(
+          '[parseAndValidateIMU] Invalid IMU field detected. Raw:',
+          JSON.stringify(data)
+        );
+        return null; // ← CRITICAL: reject instead of returning partial
+      }
+    }
+
+    // All fields valid: return complete object
+    return {
+      ax_mg,
+      ay_mg,
+      az_mg,
+      gx_mdps,
+      gy_mdps,
+      gz_mdps,
+    };
+  } catch (error) {
+    console.warn('[parseAndValidateIMU] Exception during validation:', error);
+    return null;
+  }
+}
+
+/**
+ * Helper: Check if IMU data looks like a sensor malfunction.
+ * 
+ * Returns warning string if data exceeds reasonable firmware bounds.
+ * (Note: This is for logging/monitoring, not rejection - bounds checking
+ * should happen in the pipeline layer with firmware spec tolerances.)
+ */
+export function checkIMUSanity(imu: IMUData): string | null {
+  const axceedsFirmware = Math.abs(imu.ax_mg) > 16_000;
+  const ayExceedsFirmware = Math.abs(imu.ay_mg) > 16_000;
+  const azExceedsFirmware = Math.abs(imu.az_mg) > 16_000;
+  const gxExceedsFirmware = Math.abs(imu.gx_mdps) > 250_000;
+  const gyExceedsFirmware = Math.abs(imu.gy_mdps) > 250_000;
+  const gzExceedsFirmware = Math.abs(imu.gz_mdps) > 250_000;
+
+  if (axceedsFirmware || ayExceedsFirmware || azExceedsFirmware ||
+      gxExceedsFirmware || gyExceedsFirmware || gzExceedsFirmware) {
+    return `IMU values exceed firmware spec: ax=${imu.ax_mg}, ay=${imu.ay_mg}, az=${imu.az_mg}, gx=${imu.gx_mdps}, gy=${imu.gy_mdps}, gz=${imu.gz_mdps}`;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 8. AGGREGATION UTILITIES (compute meaningful metrics)
 // ─────────────────────────────────────────────────────────────────────────────
 

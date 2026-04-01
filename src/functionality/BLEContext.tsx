@@ -318,24 +318,51 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
 
   const disconnectDevice = async () => {
     if (disconnectInFlightRef.current) {
+      console.log('[BLEContext] Disconnect already in progress, ignoring duplicate request');
       return;
     }
 
     disconnectInFlightRef.current = true;
+    console.log('[BLEContext] 🔌 Starting BLE disconnect sequence...');
+    
     try {
-      await bleService.disconnect();
+      // Attempt graceful disconnect with timeout protection
+      console.log('[BLEContext] Calling bleService.disconnect()...');
+      try {
+        // Wrap disconnect in timeout to prevent hanging
+        await Promise.race([
+          bleService.disconnect(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('BLE disconnect timeout')), 15000)
+          )
+        ]);
+        console.log('[BLEContext] ✅ BLE disconnect completed successfully');
+      } catch (bleErr: any) {
+        console.warn('[BLEContext] ⚠️  BLE disconnect error (will force state reset):', bleErr?.message || bleErr);
+        // Even if BLE disconnect fails, continue to next step
+      }
+
       // State is updated via the connectionCallback registered above.
       // DO NOT call setIsConnected/setConnectedDevice here — doing so fires
       // a second React state update and can cause a render-loop crash on Android.
     } catch (err: any) {
-      console.error('[BLEContext] Disconnect error:', err);
-      // Force state if callback somehow didn't fire
-      setIsConnected(false);
-      setConnectedDevice(null);
-      setConnectedDeviceName(null);
-      setStatusMessage('Disconnected');
+      console.error('[BLEContext] ❌ Unexpected error during disconnect:', err?.message || err);
     } finally {
+      // CRITICAL: Always ensure state is cleared to avoid app hanging
+      try {
+        console.log('[BLEContext] Forcing React state reset...');
+        setIsConnected(false);
+        setConnectedDevice(null);
+        setConnectedDeviceName(null);
+        setStatusMessage('Disconnected');
+        console.log('[BLEContext] ✅ React state cleared');
+      } catch (stateErr: any) {
+        console.error('[BLEContext] ❌ Failed to clear state:', stateErr?.message || stateErr);
+      }
+
+      // Allow new disconnect requests
       disconnectInFlightRef.current = false;
+      console.log('[BLEContext] ✅ Disconnect sequence complete');
     }
   };
 

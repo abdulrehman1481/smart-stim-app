@@ -365,6 +365,10 @@ export const WristbandSensorsPanel: React.FC = () => {
         {sensorTypes.map((sensorType) => {
           const sensor = sensors[sensorType];
           
+          // Format IMU values as integers (0 decimals), others with appropriate precision
+          const isIMUData = sensorType.startsWith('GYRO_') || sensorType.startsWith('ACC_');
+          const decimals = isIMUData ? 0 : 5;
+          
           return (
             <View
               key={sensorType}
@@ -377,7 +381,7 @@ export const WristbandSensorsPanel: React.FC = () => {
                 {sensor.label}
               </Text>
               <Text style={styles.sensorValue}>
-                {sensor.value.toFixed(2)}
+                {sensor.value.toFixed(decimals)}
               </Text>
               {sensor.unit && (
                 <Text style={styles.sensorUnit}>
