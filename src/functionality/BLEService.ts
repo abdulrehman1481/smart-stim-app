@@ -2,13 +2,17 @@ import { BleManager, Device, Characteristic, State, Subscription } from 'react-n
 import { Platform, DeviceEventEmitter } from 'react-native';
 import * as ExpoDevice from 'expo-device';
 import base64 from 'react-native-base64';
+import { teardownGuard } from './BLETeardown';
+
+// CRITICAL: single BLE manager shared across all BLE services.
+export const sharedBleManager = new BleManager();
 
 // DO NOT USE NativeEventEmitter. Use DeviceEventEmitter directly!
 const BLE_DATA_EVENT = 'BLE_DATA_LINE';
-import { 
-  BLEProtocol, 
-  BLEProtocolType, 
-  NORDIC_UART_PROTOCOL, 
+import {
+  BLEProtocol,
+  BLEProtocolType,
+  NORDIC_UART_PROTOCOL,
   ESP32_PROTOCOL,
   SUPPORTED_PROTOCOLS,
   getProtocolByServiceUUID,
@@ -16,6 +20,7 @@ import {
   LOG_SERVICE_UUID,
   LOG_NOTIFY_UUID,
   NRF_LOG_PROTOCOL,
+  ESP_SIGNAL_CTRL_PROTOCOL,
 } from './BLEProtocols';
 
 // For backward compatibility
@@ -39,9 +44,10 @@ export type BLEErrorCallback = (error: string) => void;
  * Lightweight Event Emitter pattern (replaces RxJS Subject for React Native compatibility)
  * Allows multiple subscribers without requiring full RxJS library
  */
-export class SimpleLineEmitter {
-  private subscribers: Set<(line: string) => void> = new Set();
-  private errorSubscribers: Set<(err: any) => void> = new Set();
+// BLEService class starts after SimpleLineEmitter
+class SimpleLineEmitter {
+  private subscribers = new Set<(line: string) => void>();
+  private errorSubscribers = new Set<(err: any) => void>();
 
   next(line: string) {
     this.subscribers.forEach(fn => {
@@ -102,6 +108,18 @@ class BLEService {
   private isIntentionalDisconnect = false;
 
   /**
+   * Flag to prevent callbacks from firing during teardown phase
+   * Stops all notifications, data processing from continuing after disconnect starts
+   */
+  private _isTearingDown = false;
+
+  /**
+   * Flag to prevent double-disconnect crashes
+   * Set at the START of disconnect, cleared at the END
+   */
+  private _disconnectInProgress = false;
+
+  /**
    * Line-reassembly buffer.
    *
    * The nRF52840 BLE log backend sends log messages as raw UTF-8 bytes
@@ -111,7 +129,7 @@ class BLEService {
    * a line to callers once we see a newline terminator.
    */
   private rxLineBuffer: string = '';
-  
+
   private notificationSubscriptions: Subscription[] = [];
   private disconnectSubscription: Subscription | null = null;
 
@@ -133,7 +151,8 @@ class BLEService {
   private readonly RX_BUFFER_MAX_SAFE = 32000;
 
   constructor() {
-    this.manager = new BleManager();
+    // Never instantiate a second manager here.
+    this.manager = sharedBleManager;
   }
 
   // Initialize BLE Manager
@@ -143,7 +162,7 @@ class BLEService {
       if (state === State.PoweredOn) {
         return true;
       }
-      
+
       return new Promise((resolve) => {
         const subscription = this.manager.onStateChange((newState) => {
           if (newState === State.PoweredOn) {
@@ -193,7 +212,7 @@ class BLEService {
   // Scan for BLE devices
   async startScan(
     onDeviceFound: (device: BLEDevice) => void,
-    durationSeconds: number = 10
+    durationSeconds?: number
   ): Promise<void> {
     if (this.isScanning) {
       console.log('[BLE] Already scanning, ignoring request');
@@ -203,11 +222,11 @@ class BLEService {
     try {
       // Check Bluetooth state before scanning
       const state = await this.manager.state();
-      console.log('[BLE] Current Bluetooth state:', state);
-      
+      console.log('[BLE] Bluetooth state:', state);
+
       if (state !== State.PoweredOn) {
         let stateMessage = 'Bluetooth is not available';
-        
+
         switch (state) {
           case State.PoweredOff:
             stateMessage = 'Bluetooth is turned off. Please enable Bluetooth in your device settings.';
@@ -225,23 +244,26 @@ class BLEService {
             stateMessage = 'Bluetooth state is unknown. Please check your device settings.';
             break;
         }
-        
+
         this.handleError(stateMessage);
         return;
       }
 
-      console.log('[BLE] Starting device scan for', durationSeconds, 'seconds');
-      console.log('[BLE] Looking for devices with protocols:', this.selectedProtocols.map(p => p.name).join(', '));
+      console.log('[BLE] 🔵 BLUETOOTH SCAN STARTING...');
+      console.log('[BLE] Scan duration:', durationSeconds, 'seconds');
+      console.log('[BLE] Supported protocols:', this.selectedProtocols.map(p => p.name).join(', '));
       this.isScanning = true;
       const discoveredDevices = new Map<string, BLEDevice>();
 
-      // Scan for ALL BLE devices (null = no service filter)
-      // We'll detect protocols when connecting, not during scan
-      console.log('[BLE] Scanning for ALL BLE devices...');
+      // DO NOT filter by serviceUUIDs like GUI.py — wristband may not advertise
+      // its service UUID until connected. Instead, do a general scan and filter
+      // by device NAME and advertised services.
+      console.log('[BLE] 📡 Scanning for ALL BLE devices (no UUID filter)...');
+      console.log('[BLE] Looking for: SMARTWATCH (wristband) or ESP_SIGNAL_CTRL (earbud)');
 
       this.manager.startDeviceScan(
-        null, // Scan for ALL devices (no service filter)
-        { 
+        null, // NO service UUID filter — find all devices like GUI.py does
+        {
           allowDuplicates: false, // Don't report same device multiple times
           scanMode: Platform.OS === 'android' ? 2 : undefined, // Use balanced scan mode on Android
         },
@@ -257,15 +279,11 @@ class BLEService {
             // Get device name, preferring 'name' over 'localName'
             const deviceName = device.name || device.localName || 'Unknown Device';
             const advertisedServiceUUIDs = (device.serviceUUIDs ?? []).map((uuid) => uuid.toLowerCase());
-            
-            // Show ALL devices regardless of signal strength
-            // Let user decide which to connect to
 
-            // Try to determine which protocol this device uses based on name
-            // or advertised services. We'll verify this during connection too.
+            // Try to determine which protocol this device uses based on advertised UUIDs or name
             let detectedProtocol: BLEProtocol | undefined;
 
-            // Prefer advertised service UUID match when available.
+            // **PRIMARY**: Match by advertised service UUID (most reliable)
             for (const protocol of this.selectedProtocols) {
               if (advertisedServiceUUIDs.includes(protocol.serviceUUID.toLowerCase())) {
                 detectedProtocol = protocol;
@@ -273,7 +291,8 @@ class BLEService {
               }
             }
 
-            // Fallback to tolerant device-name matching.
+            // **FALLBACK**: Match by device name like GUI.py does
+            // Look for "SMARTWATCH" or any protocol's preferred device name
             for (const protocol of this.selectedProtocols) {
               if (!detectedProtocol && matchesPreferredDeviceName(protocol, deviceName)) {
                 detectedProtocol = protocol;
@@ -281,12 +300,34 @@ class BLEService {
               }
             }
 
-            // Log discovered device
-            console.log('[BLE] ✓ Found BLE device:', {
+            // **FILTER**: Only show devices we recognize (wristband or earbud)
+            // Skip unknown devices
+            if (!detectedProtocol) {
+              return; // Skip this device — not a wristband or earbud
+            }
+
+            // Log discovered device with clear device type indicator
+            let deviceTypeEmoji = '❓';
+            let deviceTypeLabel = 'Unknown';
+
+            if (detectedProtocol) {
+              if (detectedProtocol.type === BLEProtocolType.NRF_LOG_SERVICE) {
+                deviceTypeEmoji = '⌚';
+                deviceTypeLabel = 'WRISTBAND (nRF Log Service)';
+              } else if (detectedProtocol.type === BLEProtocolType.NORDIC_UART) {
+                deviceTypeEmoji = '⌚';
+                deviceTypeLabel = 'WRISTBAND (Nordic UART)';
+              } else if (detectedProtocol.type === BLEProtocolType.ESP_SIGNAL_CTRL) {
+                deviceTypeEmoji = '🎧';
+                deviceTypeLabel = 'EARBUD (ESP Signal Controller)';
+              }
+            }
+
+            console.log(`[BLE] ${deviceTypeEmoji} ✓ Found ${deviceTypeLabel}:`, {
               id: device.id,
               name: deviceName,
               rssi: device.rssi,
-              detectedProtocol: detectedProtocol?.name || 'Unknown',
+              protocol: detectedProtocol?.name || 'Unknown',
             });
 
             // Add to discovered devices map (prevents duplicates)
@@ -299,22 +340,31 @@ class BLEService {
               };
               discoveredDevices.set(device.id, bleDevice);
               onDeviceFound(bleDevice);
-              
+
               // Highlight if this is a preferred device
               if (detectedProtocol) {
-                console.log(`[BLE] 🎯 Found preferred device: ${deviceName} (${detectedProtocol.name})`);
+                console.log(`[BLE] ${deviceTypeEmoji} 🎯 DEVICE MATCHED: ${deviceName} as ${deviceTypeLabel}`);
               }
             }
           }
         }
       );
 
-      // Auto-stop scan after duration
-      setTimeout(() => {
-        const deviceCount = discoveredDevices.size;
-        console.log(`[BLE] Scan completed. Found ${deviceCount} device(s).`);
-        this.stopScan();
-      }, durationSeconds * 1000);
+      // Auto-stop scan after duration if specified
+      if (durationSeconds && durationSeconds > 0) {
+        setTimeout(() => {
+          const deviceCount = discoveredDevices.size;
+          console.log(`[BLE] ✅ SCAN COMPLETED: Found ${deviceCount} device(s) total.`);
+          if (deviceCount === 0) {
+            console.warn('[BLE] ⚠️  No devices found. Check that:');
+            console.warn('  • Wristband (SMARTWATCH) is powered ON and advertising');
+            console.warn('  • Earbud (ESP_SIGNAL_CTRL) is powered ON and advertising');
+            console.warn('  • Bluetooth is enabled on this device');
+            console.warn('  • You have location permissions granted (Android)');
+          }
+          this.stopScan();
+        }, durationSeconds * 1000);
+      }
     } catch (error) {
       console.error('[BLE] Failed to start scan:', error);
       this.handleError(`Failed to start scan: ${error}`);
@@ -332,18 +382,30 @@ class BLEService {
   }
 
   // Connect to a device
-  async connect(deviceId: string, retries: number = 3): Promise<boolean> {
+  async connect(deviceId: string, onConnection?: BLEConnectionCallback, retries: number = 3): Promise<boolean> {
+    if (onConnection) {
+      this.connectionCallback = onConnection;
+    }
+
+    // NEVER auto-disconnect here. If already connected to this device, return true.
+    // If connected to a different device, that is a caller error — log and abort.
+    if (this.connectedDevice) {
+      if (this.connectedDevice.id === deviceId) {
+        console.log('[BLE] Already connected to this device.');
+        return true;
+      }
+      console.log('[BLE] ❌ ABORT: Caller tried to connect a second device through bleService. Use earbudService instead.');
+      return false;
+    }
+
     // CRITICAL: Reset the disconnect flag so the new session's buffer loop can run!
     this.isIntentionalDisconnect = false;
-    
+
     let lastError: any = null;
-    
+
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         console.log(`[BLE] Connection attempt ${attempt}/${retries} for device:`, deviceId);
-        
-        // Disconnect from any existing device
-        await this.disconnect();
 
         console.log('[BLE] Connecting to device...');
         // Connect to device with timeout
@@ -351,26 +413,27 @@ class BLEService {
           timeout: 10000, // 10 second timeout
         });
 
-        console.log('[BLE] Device connected, requesting maximum MTU...');
-        // Request maximum MTU (512 bytes) to minimize fragmentation
-        // Larger MTU = fewer BLE packets per message = less bridge overhead
+        console.log('[BLE] Discovering services...');
+        // Discover services and characteristics
+        await device.discoverAllServicesAndCharacteristics();
+
+        console.log('[BLE] Services discovered, requesting stable MTU...');
+        // Request stable MTU (247 bytes, BLE 4.2 sweet spot) after a safe delay
+        // to prevent native GATT thread collisions on Android.
         try {
-          const grantedMTU = await device.requestMTU(512);
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const grantedMTU = await device.requestMTU(247);
           console.log(`[BLE] ✓ MTU negotiated: ${grantedMTU} bytes (reduces fragmentation)`);
         } catch (mtuError: any) {
           console.warn('[BLE] MTU request failed (non-critical):', mtuError.message);
           // Continue anyway, will use default MTU (~23 bytes)
         }
 
-        console.log('[BLE] Discovering services...');
-        // Discover services and characteristics
-        await device.discoverAllServicesAndCharacteristics();
-
         console.log('[BLE] Services discovered, checking for supported services...');
         // Verify that the device has a supported service and auto-detect protocol
         const services = await device.services();
         let detectedProtocol: BLEProtocol | null = null;
-        
+
         for (const service of services) {
           const protocol = getProtocolByServiceUUID(service.uuid);
           if (protocol) {
@@ -379,7 +442,7 @@ class BLEService {
             break;
           }
         }
-        
+
         if (!detectedProtocol) {
           console.warn('[BLE] Device does not have any recognized service protocol');
           // Try to use the current protocol anyway
@@ -400,13 +463,13 @@ class BLEService {
         this.disconnectSubscription?.remove();
         this.disconnectSubscription = device.onDisconnected((error, disconnectedDevice) => {
           console.log('[BLE] Unexpected remote disconnect detected. Cleaning up...');
-          
+
           this.stopBatchProcessor();
 
           // CRITICAL: For unexpected drops, the OS already destroyed the streams.
           // Do NOT call sub.remove() here. Just clear the array!
-          this.notificationSubscriptions = []; 
-          
+          this.notificationSubscriptions = [];
+
           this.connectedDevice = null;
           this.rxLineBuffer = '';
           this.isIntentionalDisconnect = false;
@@ -425,14 +488,14 @@ class BLEService {
       } catch (error: any) {
         lastError = error;
         console.error(`[BLE] Connection attempt ${attempt} failed:`, error.message);
-        
+
         if (attempt < retries) {
           console.log(`[BLE] Retrying in 2 seconds... (${retries - attempt} attempts remaining)`);
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
     }
-    
+
     // All retries failed
     console.error('[BLE] All connection attempts failed');
     this.handleError(`Connection failed after ${retries} attempts: ${lastError?.message || lastError}`);
@@ -453,7 +516,7 @@ class BLEService {
     try {
       const protocol = this.currentProtocol;
       console.log('[BLE] Setting up notifications for', protocol.name, 'TX characteristic');
-      
+
       /**
        * Shared notification handler with line-reassembly.
        *
@@ -463,6 +526,9 @@ class BLEService {
        * buffer until the next notification completes them.
        */
       const handleRawNotify = (error: any, characteristic: Characteristic | null, source: string) => {
+        if (this._disconnectInProgress || this._isTearingDown) return;
+        if (!this.connectedDevice) return;
+        if (teardownGuard.isTearingDown) return;
         try {
           if (error) {
             if (error.errorCode !== 2 && !error.message?.includes('was cancelled')) {
@@ -474,7 +540,7 @@ class BLEService {
 
           // DUMB APPEND: Just add decoded text to buffer, no normalization here
           const decodedText = base64.decode(characteristic.value);
-          
+
           this.rxLineBuffer += decodedText;
 
           // Last-resort safety: if buffer gets too large, trim from end
@@ -490,7 +556,7 @@ class BLEService {
         } catch (decodeError: any) {
           console.warn('[BLE] Decode error (listener continues):', decodeError?.message || decodeError);
         }
-    };
+      };
 
       // ── 0. Start batch processing loop (JS Bridge Throttling) ────────────────
       // Process accumulated rx_buf every 50ms instead of on every notification.
@@ -560,9 +626,13 @@ class BLEService {
    */
   private processBufferLoop(): void {
     try {
+      // Guard: stop processing if teardown is in progress
+      if (this._disconnectInProgress || this.isIntentionalDisconnect) return;
+      if (!this.rxLineBuffer) return;
+
       let newlineIdx;
       let extractedCount = 0;
-      
+
       // FAST EXTRACTION: Zero Regex, minimal memory allocation
       while ((newlineIdx = this.rxLineBuffer.indexOf('\n')) !== -1) {
         let line = this.rxLineBuffer.substring(0, newlineIdx);
@@ -576,10 +646,10 @@ class BLEService {
         if (line.length > 0) {
           // ✅ LOG: Raw sensor line from device
           console.log('[BLE→Parser] RAW LINE:', line);
-          
+
           // Bulletproof emission using singleton DeviceEventEmitter
           DeviceEventEmitter.emit(BLE_DATA_EVENT, line);
-          
+
           extractedCount++;
         }
       }
@@ -600,13 +670,15 @@ class BLEService {
   /**
    * Stop the async buffer processing loop.
    * Called on disconnect or when notifications are cleaned up.
+   * Includes null guard to prevent double-stop crashes.
    */
   private stopBatchProcessor(): void {
-    if (this.batchProcessInterval) {
-      clearTimeout(this.batchProcessInterval);
-      this.batchProcessInterval = null;
-      console.log('[BLE] Async buffer processor stopped');
+    if (!this.batchProcessInterval) {
+      return; // Already stopped, nothing to do
     }
+    clearTimeout(this.batchProcessInterval);
+    this.batchProcessInterval = null;
+    console.log('[BLE] Async buffer processor stopped');
   }
 
   private cleanupSubscriptions(): void {
@@ -619,7 +691,7 @@ class BLEService {
 
     // It is safe to remove the general disconnect listener
     if (this.disconnectSubscription) {
-      try { this.disconnectSubscription.remove(); } catch {}
+      try { this.disconnectSubscription.remove(); } catch { }
       this.disconnectSubscription = null;
     }
   }
@@ -634,7 +706,7 @@ class BLEService {
     try {
       const protocol = this.currentProtocol;
       console.log('[BLE] TX:', data.substring(0, 50) + (data.length > 50 ? '...' : ''), `(${data.length} bytes)`);
-      
+
       // Encode data to base64
       const encodedData = base64.encode(data);
 
@@ -663,127 +735,72 @@ class BLEService {
     }
   }
 
-  // Disconnect from device
   async disconnect(): Promise<void> {
-    if (!this.connectedDevice) {
-      console.log('[BLE] ✓ No device connected, skipping disconnect');
-      return;
+    if (!this.connectedDevice) return;
+    if (this._disconnectInProgress) return; // Prevent double-disconnect
+
+    // STEP 1: Set flags immediately
+    this._disconnectInProgress = true;
+    this.isIntentionalDisconnect = true;
+
+    // STEP 2: Silence disconnect listener before dropping connection
+    if (this.disconnectSubscription) {
+      try { this.disconnectSubscription.remove(); } catch (_) { }
+      this.disconnectSubscription = null;
     }
-    
-    console.log('[BLE] 🔌 Starting intentional manual disconnect...');
+
+    // STEP 3: Clear notification subscriptions
+    // CRITICAL: Never call sub.remove() on monitor subscriptions in react-native-ble-plx.
+    // Internally it calls cancelTransaction → PromiseImpl.reject with null error code
+    // which causes a fatal NullPointerException on the Android native thread.
+    // The correct approach is to let cancelDeviceConnection() clean up all monitors
+    // at the native GATT level automatically — just null the JS references.
+    this.notificationSubscriptions = [];
+
+    // STEP 4: Stop data processor
+    this.stopBatchProcessor();
+
+    // Capture device ID then null device BEFORE any await
+    const deviceId = this.connectedDevice.id;
+    this.connectedDevice = null;  // NULL BEFORE FIRST AWAIT
+
+    // STEP 5: Drain in-flight packets — device is already nulled so no callbacks can fire
+    await new Promise(r => setTimeout(r, 500));
 
     try {
-      // Step 0: Immediately set flag to stop buffer loop
-      this.isIntentionalDisconnect = true;
-      console.log('[BLE] ✓ Set isIntentionalDisconnect flag');
-      
-      // Small delay to let buffer loop notice the flag
-      try {
-        await new Promise(resolve => setTimeout(resolve, 50));
-      } catch (delayErr) {
-        // Ignore
-      }
-
-      // Step 1: Stop batch processor (no error handling needed - internal cleanup)
-      console.log('[BLE] Stopping batch processor...');
-      try {
-        this.stopBatchProcessor();
-        console.log('[BLE] ✓ Batch processor stopped');
-      } catch (processorErr: any) {
-        console.warn('[BLE] ⚠️  Batch processor stop error (non-critical):', processorErr?.message);
-      }
-
-      // Step 2: Remove disconnect listener FIRST (no errors can occur here)
-      console.log('[BLE] Removing disconnect listener...');
-      if (this.disconnectSubscription) {
+      const alive = await sharedBleManager
+        .isDeviceConnected(deviceId)
+        .catch(() => false);
+      if (alive) {
         try {
-          this.disconnectSubscription.remove();
-          console.log('[BLE] ✓ Disconnect listener removed');
-        } catch (listenerErr: any) {
-          console.warn('[BLE] ⚠️  Listener removal error (non-critical):', listenerErr?.message);
-        }
-        this.disconnectSubscription = null;
-      }
-
-      // Step 3: Stop notification monitors (critical - can hang if not careful)
-      console.log('[BLE] Removing notification subscriptions...');
-      try {
-        // NEVER call sub.remove() - Android will crash. Just clear array.
-        this.notificationSubscriptions = [];
-        console.log('[BLE] ✓ Notification subscriptions cleared');
-      } catch (subErr: any) {
-        console.warn('[BLE] ⚠️  Subscription clear error (non-critical):', subErr?.message);
-      }
-
-      // Step 4: Sever the connection with timeout protection
-      console.log('[BLE] Severing BLE connection...');
-      if (this.connectedDevice) {
-        try {
-          // Check if connected first
-          let isConnected = false;
-          try {
-            isConnected = await Promise.race([
-              this.connectedDevice.isConnected(),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('isConnected timeout')), 3000))
-            ]) as boolean;
-          } catch (isConnErr: any) {
-            console.warn('[BLE] ⚠️  isConnected check failed, assuming connected:', isConnErr?.message);
-            isConnected = true;
-          }
-
-          if (isConnected) {
-            console.log('[BLE] Device is connected, cancelling connection...');
-            try {
-              await Promise.race([
-                this.manager.cancelDeviceConnection(this.connectedDevice.id),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('cancelDeviceConnection timeout')), 8000))
-              ]);
-              console.log('[BLE] ✓ Connection cancelled successfully');
-            } catch (cancelErr: any) {
-              console.warn('[BLE] ⚠️  Connection cancellation failed (non-critical):', cancelErr?.message);
-              // Continue - state will be cleared anyway
-            }
-          } else {
-            console.log('[BLE] Device already disconnected');
-          }
-        } catch (connErr: any) {
-          console.warn('[BLE] ⚠️  Connection check error (non-critical):', connErr?.message);
+          await this.manager.cancelDeviceConnection(deviceId);
+          console.log('[BLE] ✅ Connection cancelled');
+        } catch (nativeError: any) {
+          console.log('[BLE] Native cancel error (safe):', nativeError?.message ?? nativeError);
         }
       }
-
-    } catch (error: any) {
-      // Catch-all for any unexpected errors
-      console.error('[BLE] ❌ Unexpected error during disconnect:', error?.message || error);
-      // Continue to cleanup anyway
+    } catch (e) {
+      console.log('[BLE] Safe catch:', e);
     } finally {
-      // Step 5: ALWAYS clean up JS state, even if steps failed
-      console.log('[BLE] Clearing internal state...');
+      this.rxLineBuffer = '';
+      this.notificationSubscriptions = [];
+      this._disconnectInProgress = false;
       try {
-        this.connectedDevice = null;
-        this.rxLineBuffer = '';
-        this.isIntentionalDisconnect = false;
-        console.log('[BLE] ✓ Internal state cleared');
-      } catch (stateErr: any) {
-        console.error('[BLE] ❌ State cleanup error:', stateErr?.message);
+        if (this.connectionCallback) this.connectionCallback(false);
+      } catch (cbError) {
+        console.log('[BLE] connectionCallback error (safe):', cbError);
       }
-
-      // Step 6: Fire callback (non-blocking)
-      console.log('[BLE] Firing connection callback...');
-      try {
-        if (this.connectionCallback) {
-          this.connectionCallback(false);
-          console.log('[BLE] ✓ Connection callback fired');
-        }
-      } catch (callbackErr: any) {
-        console.error('[BLE] ❌ Callback error (non-critical):', callbackErr?.message);
-      }
-
-      console.log('[BLE] ✅ Manual disconnect sequence complete');
+      setTimeout(() => { this.isIntentionalDisconnect = false; }, 1000);
+      console.log('[BLE] ✅ Disconnect complete');
     }
   }
 
   // Check if currently connected
   isConnected(): boolean {
+    return this.connectedDevice !== null;
+  }
+
+  isCurrentlyConnected(): boolean {
     return this.connectedDevice !== null;
   }
 
@@ -796,7 +813,7 @@ class BLEService {
   setDataCallback(callback: BLEDataCallback): void {
     console.log('[BLE] setDataCallback registered. Checking for buffered data...');
     this.dataCallback = callback;
-    
+
     // CRITICAL FIX: If buffer has accumulated data while callback was null,
     // process it NOW. Without this, data registered before React mounts is lost.
     if (this.rxLineBuffer.length > 0) {
@@ -825,6 +842,19 @@ class BLEService {
     if (this.errorCallback) {
       this.errorCallback(message);
     }
+  }
+
+  async enableBluetooth(): Promise<boolean> {
+    if (Platform.OS === 'android') {
+      try {
+        await this.manager.enable();
+        return true;
+      } catch (error: any) {
+        this.handleError(`Failed to enable Bluetooth: ${error.message}`);
+        return false;
+      }
+    }
+    return false;
   }
 
   // Cleanup

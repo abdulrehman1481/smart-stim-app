@@ -42,7 +42,7 @@ import {
   saveGyroscopeReading,
   saveIMUReading,
   startSession as fbStartSession,
-  endSession   as fbEndSession,
+  endSession as fbEndSession,
   saveDeviceInfo,
   stopDataLogger,
   startFirebaseWriteBatcher,
@@ -254,10 +254,10 @@ export interface LiveSensorState {
 
 const initialLiveState: LiveSensorState = {
   temperature: { tempC: 0, tempF: 0, lastUpdated: null },
-  ppg:         { red: 0, ir: 0, green: 0, lastUpdated: null },
-  accel:       { x: 0, y: 0, z: 0, magnitude: 0, lastUpdated: null },
-  gyro:        { x: 0, y: 0, z: 0, rawX: 0, rawY: 0, rawZ: 0, magnitude: 0, lastUpdated: null },
-  eda:         { rawADC: 0, mv: 0, conductance_uS: 0, stressLevel: 'LOW', lastUpdated: null },
+  ppg: { red: 0, ir: 0, green: 0, lastUpdated: null },
+  accel: { x: 0, y: 0, z: 0, magnitude: 0, lastUpdated: null },
+  gyro: { x: 0, y: 0, z: 0, rawX: 0, rawY: 0, rawZ: 0, magnitude: 0, lastUpdated: null },
+  eda: { rawADC: 0, mv: 0, conductance_uS: 0, stressLevel: 'LOW', lastUpdated: null },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,9 +278,9 @@ export interface PipelineSession {
 /** Minimum ms between Firebase writes per sensor type to avoid overwhelming Firestore */
 const FB_MIN_INTERVAL_MS: Record<string, number> = {
   temperature: 5_000,  // every 5 s
-  ppg:         2_000,  // every 2 s (PPG is high-frequency)
-  eda:         3_000,  // every 3 s
-  imu:         2_000,  // every 2 s
+  ppg: 2_000,  // every 2 s (PPG is high-frequency)
+  eda: 3_000,  // every 3 s
+  imu: 2_000,  // every 2 s
 };
 
 const MAX_MESSAGES_PER_TICK = 400;
@@ -364,7 +364,7 @@ const EDA_MAX_DELTA_US = 50.0; // microSiemens per sample
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function useSensorPipeline() {
-  const { receivedMessages, isConnected, connectedDevice, connectedDeviceName } = useBLE();
+  const { receivedMessages, isConnected, connectedDevice, connectedDeviceName, isEarbudConnected } = useBLE();
   const { user } = useAuth();
 
   const [live, setLive] = useState<LiveSensorState>(initialLiveState);
@@ -396,6 +396,7 @@ export function useSensorPipeline() {
   const sessionRef = useRef(session);
   const connectedDeviceRef = useRef(connectedDevice);
   const connectedDeviceNameRef = useRef(connectedDeviceName);
+  const isEarbudConnectedRef = useRef(isEarbudConnected);
 
   // Update refs whenever these change so BLE listener callback sees latest values
   useEffect(() => {
@@ -403,7 +404,8 @@ export function useSensorPipeline() {
     sessionRef.current = session;
     connectedDeviceRef.current = connectedDevice;
     connectedDeviceNameRef.current = connectedDeviceName;
-  }, [user, session, connectedDevice, connectedDeviceName]);
+    isEarbudConnectedRef.current = isEarbudConnected;
+  }, [user, session, connectedDevice, connectedDeviceName, isEarbudConnected]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Layer 3 & 4 Diagnostic Heartbeats
@@ -469,9 +471,9 @@ export function useSensorPipeline() {
   // ── helpers ───────────────────────────────────────────────────────────────
 
   const canWriteToFirebase = useCallback((sensorKey: string): boolean => {
-    const now     = Date.now();
-    const last    = lastFbWrite.current[sensorKey] ?? 0;
-    const minGap  = FB_MIN_INTERVAL_MS[sensorKey] ?? 2_000;
+    const now = Date.now();
+    const last = lastFbWrite.current[sensorKey] ?? 0;
+    const minGap = FB_MIN_INTERVAL_MS[sensorKey] ?? 2_000;
     return now - last > minGap;
   }, []);
 
@@ -582,7 +584,7 @@ export function useSensorPipeline() {
     }
     const prev = prevIMURef.current.tempC;
     const delta = Math.abs(clamped - prev);
-    
+
     // If delta too large, use previous value to smooth spike
     if (delta > TEMP_MAX_DELTA_C) {
       if (ENABLE_VERBOSE_PIPELINE_LOGS) {
@@ -599,7 +601,7 @@ export function useSensorPipeline() {
    */
   const validatePPG = useCallback((channel: 'red' | 'ir' | 'green', value: number): number => {
     const clamped = Math.max(PPG_MIN_VALID, Math.min(PPG_MAX_VALUE, toFinite(value, 0)));
-    
+
     // PPG is less susceptible to spikes, but reject zeroes if IR (wear indicator)
     if (channel === 'ir' && clamped < PPG_WEAR_THRESHOLD) {
       // IR < wear threshold = sensor not in contact; zero it out
@@ -608,7 +610,7 @@ export function useSensorPipeline() {
       }
       return 0;
     }
-    
+
     return clamped;
   }, []);
 
@@ -625,10 +627,10 @@ export function useSensorPipeline() {
       hasPrevRef.current.edaUs = true;
       return value_uS;
     }
-    
+
     const prev = prevIMURef.current.edaUs;
     const delta = Math.abs(value_uS - prev);
-    
+
     // If delta too large, use previous value to smooth spike
     if (delta > EDA_MAX_DELTA_US) {
       if (ENABLE_VERBOSE_PIPELINE_LOGS) {
@@ -636,7 +638,7 @@ export function useSensorPipeline() {
       }
       return prev;
     }
-    
+
     prevIMURef.current.edaUs = value_uS;
     return value_uS;
   }, []);
@@ -656,10 +658,10 @@ export function useSensorPipeline() {
     if (!user || !isConnected || !connectedDevice) return;
 
     saveDeviceInfo(user.uid, {
-      deviceId:   connectedDevice.id,
+      deviceId: connectedDevice.id,
       deviceName: connectedDeviceName || 'Unknown',
       deviceType: 'NRF52840',
-      isActive:   true,
+      isActive: true,
     }).catch(err => console.warn('[Pipeline] Device registration failed:', err));
   }, [user, isConnected, connectedDevice, connectedDeviceName]);
 
@@ -685,7 +687,7 @@ export function useSensorPipeline() {
 
         const s = latestReadingsRef.current;
         const now = Date.now();
-        
+
         // Dispatch based on SensorReadingType
         switch (reading.type) {
           case 'temperature': {
@@ -700,8 +702,8 @@ export function useSensorPipeline() {
               saveTemperatureReading(userRef.current.uid, {
                 temperature: temp.tempC,
                 temperatureFahrenheit: celsiusToFahrenheit(temp.tempC),
-                deviceId: connectedDeviceRef.current?.id,
-                deviceName: connectedDeviceNameRef.current || undefined,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
               }).catch(err => console.warn('[Pipeline] Failed to queue temp reading:', err));
               markFbWrite('temperature');
@@ -713,25 +715,48 @@ export function useSensorPipeline() {
             const ppg = reading as PPGParsed;
             latestReadingsRef.current = {
               ...s,
-              red: ppg.red ?? s.red,
-              ir: ppg.ir ?? s.ir,
+              red: 0,
+              ir: 0,
               green: ppg.green ?? s.green,
               lastUpdate: now,
             };
             // Save to Firebase (with throttling)
             if (userRef.current && sessionRef.current.sessionId && canWriteToFirebase('ppg')) {
-              // Save IR channel (primary for heart rate)
+              // Save IR channel (always 0)
               savePPGReading(userRef.current.uid, {
                 channel: 'IR',
-                rawValue: ppg.ir,
-                signalQuality: ppg.ir > 50000 ? 85 : 30, // Wear detection
-                skinContact: ppg.ir > 50000,
-                deviceId: connectedDeviceRef.current?.id,
-                deviceName: connectedDeviceNameRef.current || undefined,
+                rawValue: 0,
+                signalQuality: 0,
+                skinContact: false,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
-              }).catch(err => console.warn('[Pipeline] Failed to queue PPG reading:', err));
+              }).catch(err => console.warn('[Pipeline] Failed to queue PPG IR reading:', err));
+
+              // Save RED channel (always 0)
+              savePPGReading(userRef.current.uid, {
+                channel: 'RED',
+                rawValue: 0,
+                signalQuality: 0,
+                skinContact: false,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue PPG RED reading:', err));
+
+              // Save GREEN channel (live)
+              savePPGReading(userRef.current.uid, {
+                channel: 'GREEN',
+                rawValue: ppg.green,
+                signalQuality: ppg.green > 50000 ? 85 : 30, // Wear detection
+                skinContact: ppg.green > 50000,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
+                sessionId: sessionRef.current.sessionId,
+              }).catch(err => console.warn('[Pipeline] Failed to queue PPG GREEN reading:', err));
+
               markFbWrite('ppg');
-              incDataPoints();
+              incDataPoints(3);
             }
             break;
           }
@@ -765,21 +790,21 @@ export function useSensorPipeline() {
                 x: imu.ax_mg,
                 y: imu.ay_mg,
                 z: imu.az_mg,
-                deviceId: connectedDeviceRef.current?.id,
-                deviceName: connectedDeviceNameRef.current || undefined,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
               }).catch(err => console.warn('[Pipeline] Failed to queue accel reading:', err));
-              
+
               // Save gyro reading
               saveGyroscopeReading(userRef.current.uid, {
                 x: imu.gx_mdps,
                 y: imu.gy_mdps,
                 z: imu.gz_mdps,
-                deviceId: connectedDeviceRef.current?.id,
-                deviceName: connectedDeviceNameRef.current || undefined,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
               }).catch(err => console.warn('[Pipeline] Failed to queue gyro reading:', err));
-              
+
               markFbWrite('imu');
               incDataPoints(2); // Counted as 2 readings (accel + gyro)
             }
@@ -799,14 +824,14 @@ export function useSensorPipeline() {
               const voltage = (eda.mv || 0) / 1000;
               const resistance = voltage > 0 ? (3.3 / voltage) : 100; // Default 100kΩ if invalid
               const conductance = eda.mv !== null ? edaMvToMicrosiemens(eda.mv) : 1;
-              
+
               saveEDAReading(userRef.current.uid, {
                 rawValue: eda.rawADC,
                 voltage: voltage,
                 resistance: Math.max(1, resistance), // Ensure positive
                 conductance: Math.max(0, conductance),
-                deviceId: connectedDeviceRef.current?.id,
-                deviceName: connectedDeviceNameRef.current || undefined,
+                deviceId: connectedDeviceRef.current?.id ?? (isEarbudConnectedRef.current ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDeviceNameRef.current || (isEarbudConnectedRef.current ? 'ESP_SIGNAL_CTRL' : undefined),
                 sessionId: sessionRef.current.sessionId,
               }).catch(err => console.warn('[Pipeline] Failed to queue EDA reading:', err));
               markFbWrite('eda');
@@ -835,7 +860,7 @@ export function useSensorPipeline() {
     const intervalId = setInterval(() => {
       uiTicks++;
       const next = latestReadingsRef.current;
-      
+
       // Atomically push latest readings to React state with explicit timestamp copy
       if (isMountedRef.current) {
         setLive(prev => {
@@ -845,7 +870,7 @@ export function useSensorPipeline() {
           return {
             temperature: {
               tempC: next.temp_c ?? 0,
-              tempF: next.temp_c !== null ? (next.temp_c * 9/5) + 32 : 0,
+              tempF: next.temp_c !== null ? (next.temp_c * 9 / 5) + 32 : 0,
               lastUpdated: now,
             },
             ppg: {
@@ -919,8 +944,8 @@ export function useSensorPipeline() {
         // Initialize Firebase session (creates Firestore document)
         const sessionId = await fbStartSession(user.uid, {
           sessionName: name,
-          deviceId: connectedDevice?.id,
-          deviceName: connectedDeviceName || undefined,
+          deviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
+          deviceName: connectedDeviceName || (isEarbudConnected ? 'ESP_SIGNAL_CTRL' : undefined),
           activeSensors: [
             SensorType.TEMPERATURE,
             SensorType.PPG_IR,
@@ -1008,7 +1033,7 @@ export function useSensorPipeline() {
               // Continue - batcher stop failure won't crash session end
             }
           }
-          
+
           // STEP 3: Add a small grace period for any async operations to complete
           try {
             await new Promise(resolve => setTimeout(resolve, 200));
@@ -1035,7 +1060,7 @@ export function useSensorPipeline() {
           console.log('[Session Action] ✅ Graceful shutdown completed successfully');
         })(),
         // Overall timeout: 12 seconds for entire shutdown
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Complete shutdown timeout')), 12000)
         )
       ]);

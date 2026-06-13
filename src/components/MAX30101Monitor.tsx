@@ -31,7 +31,7 @@ interface PPGData {
  * Parses log format: "max30101_demo: [MAX30101] RED=... IR=... GREEN=..."
  */
 export const MAX30101Monitor: React.FC = () => {
-  const { connectedDevice, isConnected } = useBLE();
+  const { connectedDevice, isConnected, isEarbudConnected } = useBLE();
   const { user } = useAuth();
 
   const [ppgData, setPPGData] = useState<PPGData>({ red: 0, ir: 0, green: 0 });
@@ -152,18 +152,18 @@ export const MAX30101Monitor: React.FC = () => {
               rawValue: ppg.ir,
               signalQuality: ppg.ir > 10000 ? 80 : 50,
               skinContact: ppg.ir > 10000,
-              deviceId: connectedDevice?.id,
-              deviceName: connectedDevice?.name || undefined,
+              deviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
+              deviceName: connectedDevice?.name || (isEarbudConnected ? 'ESP_SIGNAL_CTRL' : undefined),
             }).catch(err => console.error('[PPG] ❌ Failed to save IR:', err));
-            
+
             // Save heart rate if calculated
             if (heartRate > 40 && heartRate < 200) {
               saveHeartRateReading(user.uid, {
                 heartRate: heartRate,
                 confidence: ppg.ir > 50000 ? 90 : 70,
                 derivedFrom: 'PPG_IR',
-                deviceId: connectedDevice?.id,
-                deviceName: connectedDevice?.name || undefined,
+                deviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
+                deviceName: connectedDevice?.name || (isEarbudConnected ? 'ESP_SIGNAL_CTRL' : undefined),
               }).catch(err => console.error('[HR] ❌ Failed to save:', err));
             }
           }
@@ -176,7 +176,7 @@ export const MAX30101Monitor: React.FC = () => {
    * Start monitoring
    */
   const startMonitoring = useCallback(async () => {
-    if (!connectedDevice || !isConnected) return;
+    if (!connectedDevice && !isEarbudConnected) return;
 
     try {
       // Clear any existing subscription
@@ -184,10 +184,10 @@ export const MAX30101Monitor: React.FC = () => {
         subscriptionRef.current.remove();
         subscriptionRef.current = null;
       }
-      
+
       // Clear buffer
       rxBuffer.current = '';
-      
+
       subscriptionRef.current = connectedDevice.monitorCharacteristicForService(
         LOG_SERVICE_UUID,
         LOG_NOTIFY_UUID,

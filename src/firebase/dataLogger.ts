@@ -1,9 +1,9 @@
-import { 
-  collection, 
-  addDoc, 
+import {
+  collection,
+  addDoc,
   setDoc,
   doc,
-  serverTimestamp, 
+  serverTimestamp,
   Timestamp,
   writeBatch,
   query,
@@ -170,13 +170,13 @@ const shouldThrottleWrite = (userId: string, sensorType: string): boolean => {
   const key = `${userId}:${sensorType}`;
   const now = Date.now();
   const lastWrite = lastWriteTimestamp.get(key) || 0;
-  
+
   // Only write if 1+ second has passed since last write
   if (now - lastWrite >= 1000) {
     lastWriteTimestamp.set(key, now);
     return false; // Don't throttle, write this one
   }
-  
+
   return true; // Throttle, skip this one
 };
 
@@ -219,7 +219,7 @@ export const startFirebaseWriteBatcher = (): void => {
         // CRITICAL: Chunk writes to never exceed 500 operations per batch
         // Use 450 as max to stay safely under the 500 limit
         const MAX_BATCH_SIZE = 450;
-        
+
         for (let i = 0; i < writes.length; i += MAX_BATCH_SIZE) {
           const chunk = writes.slice(i, i + MAX_BATCH_SIZE);
           const batch = writeBatch(db);
@@ -278,7 +278,7 @@ export const stopDataLogger = (userId?: string): void => {
   } catch (stopErr) {
     console.warn('[Firebase] Error stopping batcher (ignored):', stopErr);
   }
-  
+
   // Only attempt flush if we have valid data structures
   try {
     if (userId && firebaseWriteQueue && Array.isArray(firebaseWriteQueue) && firebaseWriteQueue.length > 0) {
@@ -301,7 +301,7 @@ export const stopDataLogger = (userId?: string): void => {
  */
 export const flushFirebaseWriteQueue = async (): Promise<void> => {
   console.log('[Teardown Diagnostic] flushFirebaseWriteQueue called. Items in queue:', firebaseWriteQueue.length);
-  
+
   if (!firebaseWriteQueue || firebaseWriteQueue.length === 0) {
     console.log('[Teardown Diagnostic] Queue is empty, skipping Firebase commit.');
     return;
@@ -328,13 +328,13 @@ export const flushFirebaseWriteQueue = async (): Promise<void> => {
       // HARD LIMIT: Never exceed 500 operations per writeBatch()
       // Using 450 as safe margin to guarantee we stay under the hard limit
       const MAX_BATCH_SIZE = 450;
-      
+
       for (let i = 0; i < writes.length; i += MAX_BATCH_SIZE) {
         const chunk = writes.slice(i, i + MAX_BATCH_SIZE);
-        
+
         try {
           const batch = writeBatch(db);
-          
+
           for (const write of chunk) {
             const collectionRef = collection(db, 'users', userId, ...write.collectionPath.split('/'));
             const docRef = doc(collectionRef);
@@ -381,17 +381,17 @@ export const saveEDAReading = async (
 ): Promise<void> => {
   try {
     const reading: EDAReading = {
-      rawValue:    safeNum(data.rawValue) ?? null,
-      voltage:     safeNum(data.voltage) ?? null,
-      resistance:  safeNum(data.resistance) ?? null,
+      rawValue: safeNum(data.rawValue) ?? null,
+      voltage: safeNum(data.voltage) ?? null,
+      resistance: safeNum(data.resistance) ?? null,
       conductance: safeNum(data.conductance) ?? null,
       stressLevel: data.stressLevel ?? null,
-      deviceId:    data.deviceId ?? null,
-      deviceName:  data.deviceName ?? null,
-      sessionId:   data.sessionId ?? null,
-      quality:     data.quality ?? calculateDataQuality(data),
-      sensorType:  SensorType.EDA,
-      timestamp:   serverTimestamp() as Timestamp,
+      deviceId: data.deviceId ?? null,
+      deviceName: data.deviceName ?? null,
+      sessionId: data.sessionId ?? null,
+      quality: data.quality ?? calculateDataQuality(data),
+      sensorType: SensorType.EDA,
+      timestamp: serverTimestamp() as Timestamp,
     };
 
     // Queue for batch processing instead of immediate write
@@ -433,16 +433,16 @@ export const saveTemperatureReading = async (
 ): Promise<void> => {
   try {
     const reading: TemperatureReading = {
-      temperature:            safeNum(data.temperature) ?? null,
-      temperatureFahrenheit:  safeNum(data.temperatureFahrenheit) ?? null,
-      bodyLocation:           data.bodyLocation ?? null,
-      skinContact:            data.skinContact ?? null,
-      deviceId:               data.deviceId ?? null,
-      deviceName:             data.deviceName ?? null,
-      sessionId:              data.sessionId ?? null,
-      quality:                data.quality ?? calculateDataQuality(data),
-      sensorType:             SensorType.TEMPERATURE,
-      timestamp:              serverTimestamp() as Timestamp,
+      temperature: safeNum(data.temperature) ?? null,
+      temperatureFahrenheit: safeNum(data.temperatureFahrenheit) ?? null,
+      bodyLocation: data.bodyLocation ?? null,
+      skinContact: data.skinContact ?? null,
+      deviceId: data.deviceId ?? null,
+      deviceName: data.deviceName ?? null,
+      sessionId: data.sessionId ?? null,
+      quality: data.quality ?? calculateDataQuality(data),
+      sensorType: SensorType.TEMPERATURE,
+      timestamp: serverTimestamp() as Timestamp,
     };
 
     // Queue for batch processing instead of immediate write
@@ -501,22 +501,22 @@ export const savePPGReading = async (
 
     // THROTTLING: 1Hz downsampling for high-frequency raw data
     // At 100 Hz PPG, this drops 99 out of every 100 frames, keeping only 1/sec
-    if (shouldThrottleWrite(userId, 'ppg')) {
+    if (shouldThrottleWrite(userId, `ppg_${data.channel ? data.channel.toLowerCase() : 'ir'}`)) {
       // Frame throttled, skip this one
       return;
     }
 
     const reading: PPGReading = {
-      channel:          data.channel ?? null,
-      rawValue:         safeNum(data.rawValue) ?? null,
-      signalQuality:    safeNum(data.signalQuality) ?? null,
-      skinContact:      data.skinContact ?? null,
-      deviceId:         data.deviceId ?? null,
-      deviceName:       data.deviceName ?? null,
-      sessionId:        data.sessionId ?? null,
-      quality:          data.quality ?? calculateDataQuality(data),
-      sensorType:       sensorType,
-      timestamp:        serverTimestamp() as Timestamp,
+      channel: data.channel ?? null,
+      rawValue: safeNum(data.rawValue) ?? null,
+      signalQuality: safeNum(data.signalQuality) ?? null,
+      skinContact: data.skinContact ?? null,
+      deviceId: data.deviceId ?? null,
+      deviceName: data.deviceName ?? null,
+      sessionId: data.sessionId ?? null,
+      quality: data.quality ?? calculateDataQuality(data),
+      sensorType: sensorType,
+      timestamp: serverTimestamp() as Timestamp,
     };
 
     // Queue for batch processing instead of immediate write
@@ -650,19 +650,19 @@ export const saveAccelerometerReading = async (
     }
 
     const reading: AccelerometerReading = {
-      x:           safeNum(data.x) ?? null,
-      y:           safeNum(data.y) ?? null,
-      z:           safeNum(data.z) ?? null,
-      rawX:        safeNum(data.rawX) ?? null,
-      rawY:        safeNum(data.rawY) ?? null,
-      rawZ:        safeNum(data.rawZ) ?? null,
-      magnitude:   safeNum(data.magnitude ?? (Math.sqrt((data.x ?? 0) ** 2 + (data.y ?? 0) ** 2 + (data.z ?? 0) ** 2))),
-      deviceId:    data.deviceId ?? null,
-      deviceName:  data.deviceName ?? null,
-      sessionId:   data.sessionId ?? null,
-      quality:     data.quality ?? calculateDataQuality(data),
-      sensorType:  SensorType.ACCELEROMETER,
-      timestamp:   serverTimestamp() as Timestamp,
+      x: safeNum(data.x) ?? null,
+      y: safeNum(data.y) ?? null,
+      z: safeNum(data.z) ?? null,
+      rawX: safeNum(data.rawX) ?? null,
+      rawY: safeNum(data.rawY) ?? null,
+      rawZ: safeNum(data.rawZ) ?? null,
+      magnitude: safeNum(data.magnitude ?? (Math.sqrt((data.x ?? 0) ** 2 + (data.y ?? 0) ** 2 + (data.z ?? 0) ** 2))),
+      deviceId: data.deviceId ?? null,
+      deviceName: data.deviceName ?? null,
+      sessionId: data.sessionId ?? null,
+      quality: data.quality ?? calculateDataQuality(data),
+      sensorType: SensorType.ACCELEROMETER,
+      timestamp: serverTimestamp() as Timestamp,
     };
 
     // Queue for batch processing instead of immediate write
@@ -708,19 +708,19 @@ export const saveGyroscopeReading = async (
     }
 
     const reading: GyroscopeReading = {
-      x:           safeNum(data.x) ?? null,
-      y:           safeNum(data.y) ?? null,
-      z:           safeNum(data.z) ?? null,
-      rawX:        safeNum(data.rawX) ?? null,
-      rawY:        safeNum(data.rawY) ?? null,
-      rawZ:        safeNum(data.rawZ) ?? null,
-      magnitude:   safeNum(data.magnitude ?? (Math.sqrt((data.x ?? 0) ** 2 + (data.y ?? 0) ** 2 + (data.z ?? 0) ** 2))),
-      deviceId:    data.deviceId ?? null,
-      deviceName:  data.deviceName ?? null,
-      sessionId:   data.sessionId ?? null,
-      quality:     data.quality ?? calculateDataQuality(data),
-      sensorType:  SensorType.GYROSCOPE,
-      timestamp:   serverTimestamp() as Timestamp,
+      x: safeNum(data.x) ?? null,
+      y: safeNum(data.y) ?? null,
+      z: safeNum(data.z) ?? null,
+      rawX: safeNum(data.rawX) ?? null,
+      rawY: safeNum(data.rawY) ?? null,
+      rawZ: safeNum(data.rawZ) ?? null,
+      magnitude: safeNum(data.magnitude ?? (Math.sqrt((data.x ?? 0) ** 2 + (data.y ?? 0) ** 2 + (data.z ?? 0) ** 2))),
+      deviceId: data.deviceId ?? null,
+      deviceName: data.deviceName ?? null,
+      sessionId: data.sessionId ?? null,
+      quality: data.quality ?? calculateDataQuality(data),
+      sensorType: SensorType.GYROSCOPE,
+      timestamp: serverTimestamp() as Timestamp,
     };
 
     // Queue for batch processing instead of immediate write
@@ -766,23 +766,23 @@ export const saveIMUReading = async (
 
     const reading: IMUReading = {
       accelerometer: {
-        x:         safeNum(data.accelerometer?.x) ?? null,
-        y:         safeNum(data.accelerometer?.y) ?? null,
-        z:         safeNum(data.accelerometer?.z) ?? null,
+        x: safeNum(data.accelerometer?.x) ?? null,
+        y: safeNum(data.accelerometer?.y) ?? null,
+        z: safeNum(data.accelerometer?.z) ?? null,
         magnitude: safeNum(data.accelerometer?.magnitude) ?? null,
       },
       gyroscope: {
-        x:         safeNum(data.gyroscope?.x) ?? null,
-        y:         safeNum(data.gyroscope?.y) ?? null,
-        z:         safeNum(data.gyroscope?.z) ?? null,
+        x: safeNum(data.gyroscope?.x) ?? null,
+        y: safeNum(data.gyroscope?.y) ?? null,
+        z: safeNum(data.gyroscope?.z) ?? null,
         magnitude: safeNum(data.gyroscope?.magnitude) ?? null,
       },
-      activity:   data.activity ?? null,
-      deviceId:   data.deviceId ?? null,
+      activity: data.activity ?? null,
+      deviceId: data.deviceId ?? null,
       deviceName: data.deviceName ?? null,
-      sessionId:  data.sessionId ?? null,
-      quality:    data.quality ?? calculateDataQuality(data),
-      timestamp:  serverTimestamp() as Timestamp,
+      sessionId: data.sessionId ?? null,
+      quality: data.quality ?? calculateDataQuality(data),
+      timestamp: serverTimestamp() as Timestamp,
     };
 
     // Queue for batch processing instead of immediate write
@@ -820,7 +820,7 @@ export const saveDeviceInfo = async (
   try {
     const deviceRef = doc(db, 'users', userId, 'devices', deviceInfo.deviceId);
     const deviceDoc = await getDoc(deviceRef);
-    
+
     if (deviceDoc.exists()) {
       // Update existing device
       await updateDoc(deviceRef, stripUndefined({
@@ -876,7 +876,7 @@ export const startSession = async (
   try {
     const sessionRef = doc(collection(db, 'users', userId, 'sessions'));
     const sessionId = sessionRef.id;
-    
+
     const session = stripUndefined({
       sessionId,
       sessionName: sessionData.sessionName,
@@ -893,22 +893,22 @@ export const startSession = async (
       isComplete: false,
       hasErrors: false,
     });
-    
+
     await setDoc(sessionRef, session);
-    
+
     // Upsert device session count (setDoc+merge avoids crash when device doc doesn't exist yet)
     if (sessionData.deviceId) {
       const deviceRef = doc(db, 'users', userId, 'devices', sessionData.deviceId);
       await setDoc(deviceRef, {
         totalSessions: increment(1),
         lastConnected: serverTimestamp(),
-        deviceId:   sessionData.deviceId,
+        deviceId: sessionData.deviceId,
         deviceName: sessionData.deviceName || 'Unknown',
         deviceType: 'NRF52840',
         isActive: true,
       }, { merge: true });
     }
-    
+
     console.log('[Firebase] ✅ Started session:', sessionId);
     return sessionId;
   } catch (error) {
@@ -938,15 +938,15 @@ export const endSession = async (
   try {
     const sessionRef = doc(db, 'users', userId, 'sessions', sessionId);
     const sessionDoc = await getDoc(sessionRef);
-    
+
     if (!sessionDoc.exists()) {
       throw new Error(`Session ${sessionId} not found`);
     }
-    
+
     const sessionData = sessionDoc.data() as RecordingSession;
     const startTime = sessionData.startTime;
     const endTime = serverTimestamp();
-    
+
     await updateDoc(sessionRef, stripUndefined({
       endTime,
       isComplete: true,
@@ -954,7 +954,7 @@ export const endSession = async (
       hasErrors: updateData?.hasErrors || false,
       notes: updateData?.notes ?? sessionData.notes,
     }));
-    
+
     console.log('[Firebase] ✅ Ended session:', sessionId);
   } catch (error) {
     console.error('[Firebase] ❌ Failed to end session:', error);
@@ -1008,7 +1008,7 @@ export const saveStimulationEvent = async (
       ...event,
       timestamp: serverTimestamp(),
     });
-    
+
     console.log('[Firebase] ✅ Saved stimulation event:', event.waveform);
   } catch (error) {
     console.error('[Firebase] ❌ Failed to save stimulation event:', error);
@@ -1040,7 +1040,7 @@ export const saveRawSensorLog = async (
       ...log,
       timestamp: serverTimestamp(),
     });
-    
+
     // Only log occasionally to avoid spam
     if (Math.random() < 0.01) {
       console.log('[Firebase] 📄 Saved raw log batch');
@@ -1205,15 +1205,15 @@ export const updateDailyAnalytics = async (
   try {
     // This is a placeholder - implement full analytics aggregation
     // based on your specific needs
-    
+
     const analyticsRef = doc(db, 'users', userId, 'analytics', 'daily', date);
-    
+
     // Query all data for the day and aggregate
     // Implementation would involve:
     // 1. Query all sensor readings for the date range
     // 2. Calculate statistics (avg, min, max, etc.)
     // 3. Store in analytics collection
-    
+
     console.log('[Firebase] ✅ Updated daily analytics for', date);
   } catch (error) {
     console.error('[Firebase] ❌ Failed to update daily analytics:', error);
@@ -1244,7 +1244,7 @@ export const saveSensorReading = async (
 ): Promise<void> => {
   try {
     const type = reading.sensorType.toUpperCase();
-    
+
     // Route to appropriate function
     switch (type) {
       case 'EDA':
@@ -1259,18 +1259,18 @@ export const saveSensorReading = async (
           sessionId: reading.sessionId,
         });
         break;
-        
+
       case 'TEMPERATURE':
       case 'TEMP':
         await saveTemperatureReading(userId, {
           temperature: reading.value,
-          temperatureFahrenheit: (reading.value * 9/5) + 32,
+          temperatureFahrenheit: (reading.value * 9 / 5) + 32,
           deviceId: reading.deviceId,
           deviceName: reading.deviceName,
           sessionId: reading.sessionId,
         });
         break;
-        
+
       case 'HEART_RATE':
       case 'HR':
       case 'BPM':
@@ -1281,7 +1281,7 @@ export const saveSensorReading = async (
           sessionId: reading.sessionId,
         });
         break;
-        
+
       case 'SPO2':
       case 'OXYGEN':
         await saveSpO2Reading(userId, {
@@ -1293,7 +1293,7 @@ export const saveSensorReading = async (
           sessionId: reading.sessionId,
         });
         break;
-        
+
       case 'PPG_RED':
       case 'PPG_IR':
       case 'PPG_GREEN':
@@ -1306,7 +1306,7 @@ export const saveSensorReading = async (
           sessionId: reading.sessionId,
         });
         break;
-        
+
       default:
         // Save to generic collection for unknown types
         await addDoc(collection(db, 'users', userId, 'sensor_data', 'other', 'readings'), {
@@ -1387,7 +1387,7 @@ export const getRecentReadings = async (
       orderBy('timestamp', 'desc'),
       limit(limitCount)
     );
-    
+
     const querySnapshot = await getDocs(q);
     return querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
   } catch (error) {
@@ -1409,7 +1409,7 @@ export const getSession = async (
   try {
     const sessionRef = doc(db, 'users', userId, 'sessions', sessionId);
     const sessionDoc = await getDoc(sessionRef);
-    
+
     if (sessionDoc.exists()) {
       return sessionDoc.data() as RecordingSession;
     }

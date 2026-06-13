@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider, useAuth } from './src/auth/AuthContext';
 import { BLEProvider } from './src/functionality/BLEContext';
+import { DevModeProvider } from './src/functionality/DevModeContext';
 import { SensorPipelineProvider } from './src/hooks/SensorPipelineContext';
 import { ActivityIndicator, Text, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -28,7 +29,7 @@ function AppContent() {
 
   if (loading) {
     return (
-      <LinearGradient colors={['#5DADE2', '#3b82f6']} style={styles.loadingContainer}>
+      <LinearGradient colors={['#1B4965', '#18A999']} style={styles.loadingContainer}>
         <ActivityIndicator size="large" color="#ffffff" />
         <Text style={styles.loadingText}>Loading…</Text>
       </LinearGradient>
@@ -44,11 +45,13 @@ export default function App() {
       <StatusBar style="auto" />
       <AuthProvider>
         <BLEProvider>
-          <SensorPipelineProvider>
-            <NavigationContainer>
-              <AppContent />
-            </NavigationContainer>
-          </SensorPipelineProvider>
+          <DevModeProvider>
+            <SensorPipelineProvider>
+              <NavigationContainer>
+                <AppContent />
+              </NavigationContainer>
+            </SensorPipelineProvider>
+          </DevModeProvider>
         </BLEProvider>
       </AuthProvider>
     </SafeAreaProvider>

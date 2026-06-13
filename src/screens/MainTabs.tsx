@@ -75,7 +75,7 @@ export default function MainTabs() {
   const insets = useSafeAreaInsets();
   
   return (
-    <Tab.Navigator
+    <Tab.Navigator id="main-tabs"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: theme.colors.primary,

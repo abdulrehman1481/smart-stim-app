@@ -38,7 +38,7 @@ const Stack = createNativeStackNavigator<PsychologicalStackParamList>();
 
 export default function PsychologicalStack() {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <Stack.Navigator id="psychological-stack" screenOptions={{ headerShown: false }}>
       <Stack.Screen name="PsychologicalHome" component={PsychologicalInsightScreen} />
       <Stack.Screen name="GAD7Questionnaire" component={GAD7Questionnaire} />
       <Stack.Screen name="BAIQuestionnaire" component={BAIQuestionnaire} />

@@ -39,7 +39,7 @@ interface ModuleTab {
  * - Auto-scroll to latest
  */
 export const SensorLogsMonitor: React.FC = () => {
-  const { connectedDevice, isConnected } = useBLE();
+  const { connectedDevice, isConnected, isEarbudConnected } = useBLE();
   const { user } = useAuth();
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -166,7 +166,7 @@ export const SensorLogsMonitor: React.FC = () => {
    * Subscribe to BLE log notifications
    */
   const startMonitoring = async () => {
-    if (!connectedDevice || !isConnected) {
+    if (!connectedDevice && !isEarbudConnected) {
       Alert.alert('Not Connected', 'Please connect to a device first.');
       return;
     }

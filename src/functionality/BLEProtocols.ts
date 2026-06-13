@@ -66,6 +66,15 @@ export const ESP_SIGNAL_CTRL_PROTOCOL: BLEProtocol = {
   preferredDeviceNames: ['ESP_SIGNAL_CTRL', 'Esp_signal_ctrl', 'ESP-SIGNAL-CTRL', 'ESP SIGNAL CTRL'],
 };
 
+export const ESP_EARBUD_PROTOCOL: BLEProtocol = {
+  name: 'ESP_SIGNAL_CTRL',
+  preferredDeviceName: 'ESP_SIGNAL_CTRL',
+  serviceUUID: '12345678-1234-1234-1234-1234567890ab',
+  rxCharUUID: '12345678-1234-1234-1234-1234567890ac',
+  txCharUUID: '12345678-1234-1234-1234-1234567890ad',
+  type: BLEProtocolType.ESP_SIGNAL_CTRL,
+};
+
 // ── All supported protocols – NRF_LOG first so it takes priority during scan ─
 export const SUPPORTED_PROTOCOLS: BLEProtocol[] = [
   NRF_LOG_PROTOCOL,

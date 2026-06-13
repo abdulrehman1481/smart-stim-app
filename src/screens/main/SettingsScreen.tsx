@@ -1,15 +1,52 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  StyleSheet,
+  Alert,
+  Switch,
+  Modal,
+  TextInput,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../auth/AuthContext';
 import { useBLE } from '../../functionality/BLEContext';
 import { BluetoothScanModal } from '../../components/BluetoothScanModal';
+import {
+  useDevMode,
+  ALL_SENSOR_KEYS,
+  SENSOR_LABELS,
+  SensorKey,
+} from '../../functionality/DevModeContext';
+
+const SENSOR_ICONS: Record<SensorKey, keyof typeof Ionicons.glyphMap> = {
+  ppgGreen: 'heart',
+  ppgIR: 'heart-half',
+  ppgRed: 'heart-circle',
+  accel: 'speedometer',
+  gyro: 'compass',
+  temp: 'thermometer',
+  eda: 'flash',
+};
 
 export default function SettingsScreen() {
   const { user, logout } = useAuth();
   const { isConnected, connectedDeviceName } = useBLE();
+  const {
+    isDevMode,
+    enableDevMode,
+    disableDevMode,
+    sensorToggles,
+    toggleSensor,
+    enabledSensorCount,
+  } = useDevMode();
+
   const [bleModalVisible, setBleModalVisible] = useState(false);
+  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
@@ -28,14 +65,83 @@ export default function SettingsScreen() {
     ]);
   };
 
+  const handleDevModeToggle = (value: boolean) => {
+    if (value) {
+      setPasswordInput('');
+      setPasswordModalVisible(true);
+    } else {
+      disableDevMode();
+    }
+  };
+
+  const handlePasswordSubmit = () => {
+    const success = enableDevMode(passwordInput);
+    setPasswordModalVisible(false);
+    setPasswordInput('');
+    if (success) {
+      Alert.alert('Developer Mode', 'Developer mode enabled successfully.');
+    } else {
+      Alert.alert('Access Denied', 'Incorrect password. Developer mode was not enabled.');
+    }
+  };
+
+  const handlePasswordCancel = () => {
+    setPasswordModalVisible(false);
+    setPasswordInput('');
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <BluetoothScanModal visible={bleModalVisible} onClose={() => setBleModalVisible(false)} />
+
+      {/* Password Modal */}
+      <Modal
+        visible={passwordModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={handlePasswordCancel}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Enter Developer Password</Text>
+            <Text style={styles.modalSubtitle}>
+              A password is required to enable developer mode.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="Password"
+              placeholderTextColor="#94a3b8"
+              secureTextEntry
+              value={passwordInput}
+              onChangeText={setPasswordInput}
+              autoFocus
+              onSubmitEditing={handlePasswordSubmit}
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalButtonCancel}
+                onPress={handlePasswordCancel}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.modalButtonCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalButtonConfirm}
+                onPress={handlePasswordSubmit}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.modalButtonConfirmText}>Confirm</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerIcon}>
-            <Ionicons name="settings" size={28} color="#5DADE2" />
+            <Ionicons name="settings" size={28} color="#1B4965" />
           </View>
           <Text style={styles.headerTitle}>Settings</Text>
           <Text style={styles.headerSubtitle}>Manage your preferences</Text>
@@ -48,7 +154,7 @@ export default function SettingsScreen() {
             <Text style={styles.sectionTitle}>Profile</Text>
             <View style={styles.profileCard}>
               <View style={styles.profileAvatar}>
-                <Ionicons name="person" size={32} color="#5DADE2" />
+                <Ionicons name="person" size={32} color="#1B4965" />
               </View>
               <View style={styles.profileInfo}>
                 <Text style={styles.profileName}>{user?.email?.split('@')[0] || 'User'}</Text>
@@ -67,7 +173,7 @@ export default function SettingsScreen() {
                   <Ionicons
                     name={isConnected ? 'bluetooth' : 'bluetooth-outline'}
                     size={24}
-                    color={isConnected ? '#10b981' : '#5DADE2'}
+                    color={isConnected ? '#10b981' : '#1B4965'}
                   />
                   <View style={styles.settingText}>
                     <Text style={styles.settingTitle}>
@@ -80,7 +186,65 @@ export default function SettingsScreen() {
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
               </TouchableOpacity>
+            </View>
+          </View>
 
+          {/* Developer Mode Section */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Developer Mode</Text>
+            <View style={styles.devModeCard}>
+              <View style={styles.devModeRow}>
+                <View style={styles.settingLeft}>
+                  <Ionicons name="code-slash" size={24} color="#1B4965" />
+                  <View style={styles.settingText}>
+                    <Text style={styles.settingTitle}>Developer Mode</Text>
+                    <Text style={styles.settingSubtitle}>Access raw sensor data</Text>
+                  </View>
+                </View>
+                <Switch
+                  value={isDevMode}
+                  onValueChange={handleDevModeToggle}
+                  trackColor={{ false: '#e2e8f0', true: '#18A999' }}
+                  thumbColor="#ffffff"
+                />
+              </View>
+
+              {/* Per-sensor toggles (visible only in dev mode) */}
+              {isDevMode && (
+                <View style={styles.sensorSection}>
+                  <View style={styles.sensorSectionHeader}>
+                    <Text style={styles.sensorSectionTitle}>Sensor Configuration</Text>
+                    <Text style={styles.sensorSectionSubtitle}>
+                      {enabledSensorCount}/7 sensors enabled
+                    </Text>
+                  </View>
+                  {ALL_SENSOR_KEYS.map((key) => (
+                    <View key={key} style={styles.sensorRow}>
+                      <View style={styles.sensorLeft}>
+                        <Ionicons
+                          name={SENSOR_ICONS[key]}
+                          size={20}
+                          color={sensorToggles[key] ? '#18A999' : '#94a3b8'}
+                        />
+                        <Text
+                          style={[
+                            styles.sensorLabel,
+                            !sensorToggles[key] && styles.sensorLabelDisabled,
+                          ]}
+                        >
+                          {SENSOR_LABELS[key]}
+                        </Text>
+                      </View>
+                      <Switch
+                        value={sensorToggles[key]}
+                        onValueChange={() => toggleSensor(key)}
+                        trackColor={{ false: '#e2e8f0', true: '#18A999' }}
+                        thumbColor="#ffffff"
+                      />
+                    </View>
+                  ))}
+                </View>
+              )}
             </View>
           </View>
 
@@ -89,7 +253,8 @@ export default function SettingsScreen() {
             <TouchableOpacity
               style={styles.logoutButton}
               onPress={handleLogout}
-              activeOpacity={0.8}>
+              activeOpacity={0.8}
+            >
               <Ionicons name="log-out" size={20} color="#dc2626" />
               <Text style={styles.logoutButtonText}>Logout</Text>
             </TouchableOpacity>
@@ -157,6 +322,62 @@ const styles = StyleSheet.create({
   settingText: { marginLeft: 12, flex: 1 },
   settingTitle: { fontSize: 16, fontWeight: '600', color: '#1e293b' },
   settingSubtitle: { fontSize: 14, color: '#64748b' },
+
+  /* Developer Mode */
+  devModeCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  devModeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  /* Sensor Section */
+  sensorSection: {
+    marginTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    paddingTop: 16,
+  },
+  sensorSectionHeader: {
+    marginBottom: 12,
+  },
+  sensorSectionTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1B4965',
+    marginBottom: 2,
+  },
+  sensorSectionSubtitle: {
+    fontSize: 13,
+    color: '#64748b',
+  },
+  sensorRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  sensorLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  sensorLabel: {
+    fontSize: 15,
+    color: '#1e293b',
+    marginLeft: 12,
+  },
+  sensorLabelDisabled: {
+    color: '#94a3b8',
+  },
+
+  /* Logout */
   logoutButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -169,4 +390,68 @@ const styles = StyleSheet.create({
     borderColor: '#fecaca',
   },
   logoutButtonText: { fontSize: 16, fontWeight: '600', color: '#dc2626' },
+
+  /* Password Modal */
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalContent: {
+    backgroundColor: '#ffffff',
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 360,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+    marginBottom: 6,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 20,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    padding: 14,
+    fontSize: 16,
+    color: '#1e293b',
+    backgroundColor: '#f8fafc',
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  modalButtonCancel: {
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    backgroundColor: '#f1f5f9',
+  },
+  modalButtonCancelText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  modalButtonConfirm: {
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    backgroundColor: '#1B4965',
+  },
+  modalButtonConfirmText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
 });

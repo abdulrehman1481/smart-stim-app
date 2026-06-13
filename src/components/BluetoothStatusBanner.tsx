@@ -8,7 +8,7 @@ import {
   Platform,
   Alert,
 } from 'react-native';
-import { bleService } from '../functionality/BLEService';
+import { useBLE } from '../functionality/BLEContext';
 
 interface BluetoothStatusBannerProps {
   onStatusChange?: (status: string) => void;
@@ -18,34 +18,17 @@ interface BluetoothStatusBannerProps {
  * BluetoothStatusBanner - Shows Bluetooth status and guides user to fix issues
  */
 export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ onStatusChange }) => {
-  const [btState, setBtState] = useState<string>('Unknown');
+  const { bluetoothState, enableBluetooth } = useBLE();
   const [showBanner, setShowBanner] = useState<boolean>(true);
 
   useEffect(() => {
-    checkBluetoothStatus();
-
-    // Check status every 2 seconds
-    const interval = setInterval(checkBluetoothStatus, 2000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const checkBluetoothStatus = async () => {
-    try {
-      const state = await bleService.getBluetoothState();
-      setBtState(state);
-      onStatusChange?.(state);
-
-      // Auto-hide banner if Bluetooth is on
-      if (state === 'PoweredOn') {
-        setShowBanner(false);
-      } else {
-        setShowBanner(true);
-      }
-    } catch (error) {
-      console.error('[BTStatusBanner] Error checking state:', error);
+    onStatusChange?.(bluetoothState);
+    if (bluetoothState === 'PoweredOn') {
+      setShowBanner(false);
+    } else {
+      setShowBanner(true);
     }
-  };
+  }, [bluetoothState, onStatusChange]);
 
   const openBluetoothSettings = () => {
     if (Platform.OS === 'android') {
@@ -78,16 +61,27 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ on
     }
   };
 
+  const handleAction = async () => {
+    if (bluetoothState === 'PoweredOff' && Platform.OS === 'android') {
+      const success = await enableBluetooth();
+      if (success) {
+        return;
+      }
+    }
+    openBluetoothSettings();
+  };
+
   const getBannerConfig = () => {
-    switch (btState) {
+    switch (bluetoothState) {
       case 'PoweredOff':
         return {
           icon: '📴',
           title: 'Bluetooth is OFF',
-          message: 'Turn on Bluetooth to scan for devices',
+          message: Platform.OS === 'android' ? 'Tap below to turn on Bluetooth directly' : 'Turn on Bluetooth in settings',
           color: '#ef4444',
           bgColor: '#fef2f2',
           showAction: true,
+          actionText: Platform.OS === 'android' ? 'Turn On Bluetooth' : 'Open Settings',
         };
       case 'Unauthorized':
         return {
@@ -97,6 +91,7 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ on
           color: '#f59e0b',
           bgColor: '#fffbeb',
           showAction: true,
+          actionText: 'Open Settings',
         };
       case 'Unsupported':
         return {
@@ -106,6 +101,7 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ on
           color: '#dc2626',
           bgColor: '#fef2f2',
           showAction: false,
+          actionText: '',
         };
       case 'PoweredOn':
         return {
@@ -115,6 +111,7 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ on
           color: '#22c55e',
           bgColor: '#f0fdf4',
           showAction: false,
+          actionText: '',
         };
       default:
         return {
@@ -124,11 +121,12 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ on
           color: '#6b7280',
           bgColor: '#f9fafb',
           showAction: false,
+          actionText: '',
         };
     }
   };
 
-  if (!showBanner && btState === 'PoweredOn') {
+  if (!showBanner && bluetoothState === 'PoweredOn') {
     return null;
   }
 
@@ -149,13 +147,13 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({ on
       {config.showAction && (
         <TouchableOpacity
           style={[styles.actionButton, { backgroundColor: config.color }]}
-          onPress={openBluetoothSettings}
+          onPress={handleAction}
         >
-          <Text style={styles.actionButtonText}>Open Settings</Text>
+          <Text style={styles.actionButtonText}>{config.actionText}</Text>
         </TouchableOpacity>
       )}
 
-      {btState === 'PoweredOn' && (
+      {bluetoothState === 'PoweredOn' && (
         <TouchableOpacity
           style={styles.dismissButton}
           onPress={() => setShowBanner(false)}

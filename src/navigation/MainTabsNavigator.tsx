@@ -2,11 +2,13 @@ import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useDevMode } from '../functionality/DevModeContext';
 
 import HomeScreen from '../screens/main/HomeScreen';
 import PhysiologicalInsightScreen from '../screens/main/PhysiologicalInsightScreen';
 import StimulationScreen from '../screens/main/StimulationScreen';
 import SettingsScreen from '../screens/main/SettingsScreen';
+import SensorTabScreen from '../screens/main/SensorTabScreen';
 import PsychologicalStack from './PsychologicalStack';
 
 export type MainTabsParamList = {
@@ -14,6 +16,7 @@ export type MainTabsParamList = {
   Physiological: undefined;
   Stimulation: undefined;
   Psychological: undefined;
+  Sensor: undefined;
   Settings: undefined;
 };
 
@@ -21,13 +24,14 @@ const Tab = createBottomTabNavigator<MainTabsParamList>();
 
 export default function MainTabsNavigator() {
   const insets = useSafeAreaInsets();
+  const { isDevMode } = useDevMode();
 
   return (
-    <Tab.Navigator
+    <Tab.Navigator id="main-tabs-navigator"
       screenOptions={({ route }) => ({
         headerShown: false,
         freezeOnBlur: true,
-        tabBarActiveTintColor: '#5DADE2',
+        tabBarActiveTintColor: '#1B4965',
         tabBarInactiveTintColor: '#94a3b8',
         tabBarStyle: {
           backgroundColor: '#ffffff',
@@ -52,9 +56,9 @@ export default function MainTabsNavigator() {
           } else if (route.name === 'Stimulation') {
             iconName = focused ? 'musical-notes' : 'musical-notes-outline';
           } else if (route.name === 'Psychological') {
-            iconName = focused ? 'brain' : 'brain-outline' as any;
-            // Ionicons doesn't have brain; fallback to headset
             iconName = focused ? 'headset' : 'headset-outline';
+          } else if (route.name === 'Sensor') {
+            iconName = focused ? 'analytics' : 'analytics-outline';
           } else if (route.name === 'Settings') {
             iconName = focused ? 'settings' : 'settings-outline';
           }
@@ -66,6 +70,9 @@ export default function MainTabsNavigator() {
       <Tab.Screen name="Physiological" component={PhysiologicalInsightScreen} options={{ title: 'Physical' }} />
       <Tab.Screen name="Stimulation" component={StimulationScreen} options={{ title: 'Stimulation' }} />
       <Tab.Screen name="Psychological" component={PsychologicalStack} options={{ title: 'Mental' }} />
+      {isDevMode && (
+        <Tab.Screen name="Sensor" component={SensorTabScreen} options={{ title: 'Sensor' }} />
+      )}
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
     </Tab.Navigator>
   );

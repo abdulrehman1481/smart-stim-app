@@ -18,7 +18,7 @@ import { saveTemperatureReading } from '../firebase/dataLogger';
  * Parses log format: "as6221_demo: [AS6221] Temperature: 24.5°C"
  */
 export const TemperatureMonitor: React.FC = () => {
-  const { connectedDevice, isConnected } = useBLE();
+  const { connectedDevice, isConnected, isEarbudConnected } = useBLE();
   const { user } = useAuth();
   
   const [isMonitoring, setIsMonitoring] = useState(false);
@@ -77,7 +77,7 @@ export const TemperatureMonitor: React.FC = () => {
               temperatureFahrenheit: (temp * 9/5) + 32,
               bodyLocation: 'WRIST',
               skinContact: temp > 25 && temp < 45,
-              deviceId: connectedDevice?.id,
+              deviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
               deviceName: connectedDevice?.name || undefined,
             }).catch(err => {
               console.error('[Temperature] ❌ Failed to save:', err);
@@ -107,7 +107,7 @@ export const TemperatureMonitor: React.FC = () => {
    * Start monitoring
    */
   const startMonitoring = useCallback(async () => {
-    if (!connectedDevice || !isConnected) return;
+    if (!connectedDevice && !isEarbudConnected) return;
 
     try {
       // Clear any existing subscription

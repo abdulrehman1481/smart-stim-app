@@ -17,55 +17,89 @@ import { Button, Badge, Card } from './shared/StyledComponents';
 export const DeviceScanner: React.FC = () => {
   const {
     isScanning,
+    isConnecting,
     discoveredDevices,
+    connectedDevice,
     connectedDeviceName,
     isConnected,
+    isEarbudConnected,
+    isEarbudConnecting,
     availableProtocols,
     selectedProtocols,
     currentProtocol,
     startScan,
     stopScan,
-    connectToDevice,
+    connectToDeviceRouter,
     disconnectDevice,
+    disconnectEarbud,
+    disconnectAll,
     toggleProtocol,
   } = useBLE();
 
-  const renderDevice = ({ item }: { item: BLEDevice }) => {
-    const deviceName = item.name || 'Unknown Device';
-    const isPreferred = item.protocol !== undefined;
-    const isThisConnected = isConnected && connectedDeviceName === item.name;
-    const protocolBadge = item.protocol?.name.split(' ')[0] || '?';
-    const protocolVariant = item.protocol?.type === 'NORDIC_UART' ? 'info' as const : 'success' as const;
+  const renderDevice = (device: BLEDevice) => {
+    // 1. BULLETPROOF DETECTION: Check name, protocol, AND the exact MAC address
+    const name = (device.name || '').toUpperCase();
+    const protocol = (device.protocol?.name || '').toUpperCase();
+    
+    const isEarbud = 
+      name.includes('ESP') || 
+      name.includes('SIGNAL') || 
+      protocol.includes('ESP') || 
+      device.id === '3C:0F:02:D7:2E:05'; // Hardcoded fallback from logs
+
+    // 2. Isolate states
+    const isThisDeviceConnecting = isEarbud ? isEarbudConnecting : isConnecting; 
+    const isThisDeviceConnected = isEarbud ? isEarbudConnected : (connectedDevice?.id === device.id);
 
     return (
-      <TouchableOpacity
-        onPress={() => !isConnected && connectToDevice(item.id)}
-        disabled={isConnected}
-        style={{ marginBottom: theme.spacing.sm }}
-      >
-        <Card
-          variant={isThisConnected ? 'elevated' : isPreferred ? 'outlined' : 'default'}
-          style={[
-            isThisConnected && { borderColor: theme.colors.success, borderWidth: 2, backgroundColor: '#f0fdf4' },
-            isPreferred && !isThisConnected && { borderColor: theme.colors.primary }
-          ]}
-        >
-          <View style={styles.deviceInfo}>
-            <View style={styles.deviceNameRow}>
-              <Text style={[styles.deviceName, isThisConnected && { color: theme.colors.success }]}>
-                {deviceName}
-                {isThisConnected && ' (Connected)'}
-              </Text>
-              {item.protocol && (
-                <Badge variant={protocolVariant} text={protocolBadge} />
-              )}
-            </View>
-            <Text style={styles.deviceDetails}>
-              {item.id} | RSSI: {item.rssi || 'N/A'}
+      <View key={device.id} style={styles.deviceCard}>
+        <View style={styles.deviceInfo}>
+          <Text style={styles.deviceName}>{device.name || 'Unknown Device'}</Text>
+          <Text style={styles.deviceType}>{isEarbud ? '🎧 ESP Earbud' : '⌚ Smartwatch'}</Text>
+          <View style={styles.statusRow}>
+            <View style={[
+              styles.statusDot,
+              { backgroundColor: isThisDeviceConnected ? '#22c55e' : '#6b7280' }
+            ]} />
+            <Text style={[
+              styles.statusText,
+              { color: isThisDeviceConnected ? '#22c55e' : '#6b7280' }
+            ]}>
+              {isThisDeviceConnecting ? 'Connecting...' : isThisDeviceConnected ? 'Connected' : 'Not Connected'}
             </Text>
           </View>
-        </Card>
-      </TouchableOpacity>
+        </View>
+
+        <View style={styles.buttonCol}>
+          {isThisDeviceConnecting ? (
+            <ActivityIndicator color="#6366f1" size="small" />
+          ) : isThisDeviceConnected ? (
+            <TouchableOpacity
+              style={styles.disconnectBtn}
+              onPress={() => {
+                console.log(`[UI] Disconnect tapped: ${device.id} isEarbud=${isEarbud}`);
+                if (isEarbud) {
+                  disconnectEarbud();
+                } else {
+                  disconnectDevice();
+                }
+              }}
+            >
+              <Text style={styles.disconnectBtnText}>Disconnect</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.connectBtn}
+              onPress={() => {
+                console.log(`[UI] Connect tapped: ${device.id} isEarbud=${isEarbud}`);
+                connectToDeviceRouter(device.id);
+              }}
+            >
+              <Text style={styles.connectBtnText}>Connect</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
     );
   };
 
@@ -76,79 +110,74 @@ export const DeviceScanner: React.FC = () => {
       
       <View style={styles.header}>
         <Text style={styles.title}>📡 BLE Devices</Text>
-        {isConnected && (
-          <Text style={styles.connectedInfo}>
-            Connected: {connectedDeviceName} ({currentProtocol.name})
-          </Text>
-        )}
-        
-        {/* Protocol Filter */}
-        {!isConnected && (
-          <View style={styles.protocolFilter}>
-            <Text style={styles.filterLabel}>Scan for:</Text>
-            <View style={styles.protocolChips}>
-              {availableProtocols.map((protocol) => {
-                const isSelected = selectedProtocols.some(p => p.type === protocol.type);
-                return (
-                  <TouchableOpacity
-                    key={protocol.type}
-                    style={[
-                      styles.protocolChip,
-                      isSelected && styles.protocolChipSelected,
-                      protocol.type === 'NORDIC_UART' && isSelected && styles.nordicChip,
-                      protocol.type === 'ESP32_CUSTOM' && isSelected && styles.esp32Chip,
-                    ]}
-                    onPress={() => toggleProtocol(protocol)}
-                    disabled={isScanning}
-                  >
-                    <Text style={[
-                      styles.protocolChipText,
-                      isSelected && styles.protocolChipTextSelected,
-                    ]}>
-                      {protocol.name.split(' ')[0]}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+        {(isConnected || isEarbudConnected) && (
+          <View>
+            {isConnected && (
+              <Text style={styles.connectedInfo}>
+                📡 Smartwatch: {connectedDeviceName} ({currentProtocol.name})
+              </Text>
+            )}
+            {isEarbudConnected && (
+              <Text style={styles.connectedInfo}>
+                👂 Earbud: Connected (ESP_SIGNAL_CTRL)
+              </Text>
+            )}
           </View>
         )}
         
-        <View style={styles.buttonRow}>
-          {!isConnected ? (
-            <>
-              <Button
-                variant="primary"
-                size="md"
-                onPress={startScan}
-                disabled={isScanning}
-                style={{ flex: 1 }}
-              >
-                {isScanning ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  'Scan'
-                )}
-              </Button>
-              {isScanning && (
-                <Button
-                  variant="danger"
-                  size="md"
-                  onPress={stopScan}
-                  style={{ flex: 1 }}
+        {/* Protocol Filter */}
+        <View style={styles.protocolFilter}>
+          <Text style={styles.filterLabel}>Scan for:</Text>
+          <View style={styles.protocolChips}>
+            {availableProtocols.map((protocol) => {
+              const isSelected = selectedProtocols.some(p => p.type === protocol.type);
+              return (
+                <TouchableOpacity
+                  key={protocol.type}
+                  style={[
+                    styles.protocolChip,
+                    isSelected && styles.protocolChipSelected,
+                    protocol.type === 'NORDIC_UART' && isSelected && styles.nordicChip,
+                    protocol.type === 'ESP32_CUSTOM' && isSelected && styles.esp32Chip,
+                    protocol.type === 'ESP_SIGNAL_CTRL' && isSelected && styles.esp32Chip,
+                  ]}
+                  onPress={() => toggleProtocol(protocol)}
+                  disabled={isScanning}
                 >
-                  Stop
-                </Button>
-              )}
-            </>
-          ) : (
+                  <Text style={[
+                    styles.protocolChipText,
+                    isSelected && styles.protocolChipTextSelected,
+                  ]}>
+                    {protocol.name.split(' ')[0]}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+        
+        <View style={styles.buttonRow}>
+          <Button
+            variant="primary"
+            size="md"
+            onPress={startScan}
+            disabled={isScanning}
+            style={{ flex: 1 }}
+          >
+            {isScanning ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              'Scan'
+            )}
+          </Button>
+          {isScanning && (
             <Button
               variant="danger"
               size="md"
-              onPress={disconnectDevice}
+              onPress={stopScan}
               style={{ flex: 1 }}
             >
-              Disconnect
+              Stop
             </Button>
           )}
         </View>
@@ -166,9 +195,22 @@ export const DeviceScanner: React.FC = () => {
         <FlatList
           data={discoveredDevices}
           keyExtractor={(item) => item.id}
-          renderItem={renderDevice}
+          renderItem={({ item }) => renderDevice(item)}
           style={styles.list}
           contentContainerStyle={styles.listContent}
+          ListFooterComponent={
+            isConnected && isEarbudConnected ? (
+              <TouchableOpacity
+                style={styles.disconnectAllBtn}
+                onPress={() => {
+                  console.log('[UI] Disconnect All tapped');
+                  disconnectAll();
+                }}
+              >
+                <Text style={styles.disconnectAllBtnText}>⚠️ Disconnect All Devices</Text>
+              </TouchableOpacity>
+            ) : null
+          }
         />
       )}
     </View>
@@ -265,6 +307,60 @@ const styles = StyleSheet.create({
     ...theme.typography.caption,
     color: theme.colors.textSecondary,
   },
+  connectingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: theme.spacing.xs,
+    gap: theme.spacing.xs,
+  },
+  connectingText: {
+    ...theme.typography.caption,
+    color: theme.colors.primary,
+    fontWeight: '600',
+  },
+  deviceRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: theme.spacing.md,
+    paddingHorizontal: theme.spacing.md,
+    backgroundColor: '#fff',
+    marginHorizontal: theme.spacing.md,
+    marginVertical: theme.spacing.xs,
+    borderRadius: theme.borderRadius.lg,
+    elevation: 1,
+  },
+  deviceInfoWrapper: {
+    flex: 1,
+  },
+  deviceType: {
+    ...theme.typography.caption,
+    color: theme.colors.primary,
+    fontWeight: '600',
+    marginTop: theme.spacing.xs,
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+  },
+  connectButton: {
+    backgroundColor: theme.colors.primary,
+    paddingVertical: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+  },
+  disconnectButton: {
+    backgroundColor: theme.colors.error,
+    paddingVertical: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+  },
+  buttonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
   emptyState: {
     flex: 1,
     alignItems: 'center',
@@ -276,5 +372,71 @@ const styles = StyleSheet.create({
     color: theme.colors.textSecondary,
     textAlign: 'center',
     lineHeight: 24,
+  },
+  deviceCard: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: theme.spacing.md,
+    paddingHorizontal: theme.spacing.md,
+    backgroundColor: '#fff',
+    marginHorizontal: theme.spacing.md,
+    marginVertical: theme.spacing.xs,
+    borderRadius: theme.borderRadius.lg,
+    elevation: 2,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.xs,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusText: {
+    ...theme.typography.caption,
+    fontWeight: '600',
+  },
+  buttonCol: {
+    marginLeft: theme.spacing.md,
+  },
+  disconnectBtn: {
+    backgroundColor: '#dc2626',
+    paddingVertical: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+  },
+  disconnectBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  connectBtn: {
+    backgroundColor: theme.colors.primary,
+    paddingVertical: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: theme.borderRadius.md,
+  },
+  connectBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  disconnectAllBtn: {
+    backgroundColor: '#7f1d1d',
+    borderRadius: 10,
+    padding: 14,
+    marginTop: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#dc2626',
+  },
+  disconnectAllBtnText: {
+    color: '#fca5a5',
+    fontWeight: '700',
+    fontSize: 14,
   },
 });

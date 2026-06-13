@@ -58,7 +58,7 @@ interface AggregatedEDAState {
  * Parses log format: "eda_raw: t=...ms raw=... mv=... dRaw=... flat_cnt=..."
  */
 export const ADS1113Monitor: React.FC = () => {
-  const { connectedDevice, isConnected } = useBLE();
+  const { connectedDevice, isConnected, isEarbudConnected } = useBLE();
   const { user } = useAuth();
 
   // ───── AGGREGATED STATE (single state update per throttle interval) ─────
@@ -222,7 +222,7 @@ export const ADS1113Monitor: React.FC = () => {
               resistance: resistance,
               conductance: conductance,
               stressLevel: aggregated.stressLevel as any,
-              deviceId: connectedDevice?.id,
+              deviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
               deviceName: connectedDevice?.name ?? undefined,
             }).catch(err => {
               console.error('[ADS1113] ❌ Failed to save EDA:', err);
@@ -237,7 +237,7 @@ export const ADS1113Monitor: React.FC = () => {
    * Start monitoring
    */
   const startMonitoring = useCallback(async () => {
-    if (!connectedDevice || !isConnected) return;
+    if (!connectedDevice && !isEarbudConnected) return;
 
     try {
       // Clear any existing subscription

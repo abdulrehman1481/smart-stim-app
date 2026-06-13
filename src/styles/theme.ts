@@ -1,49 +1,50 @@
 // Shared theme and styling constants for the entire app
+// Color Palette: Dark Blue (primary) + Teal (accent) + error red only
 export const theme = {
-  // Color Palette
+  // Color Palette — max 3 core colors as per client requirement
   colors: {
-    primary: '#6366f1',
-    primaryDark: '#4f46e5',
-    primaryLight: '#818cf8',
-    secondary: '#8b5cf6',
-    accent: '#ec4899',
-    
+    primary: '#1B4965',       // Dark navy blue
+    primaryDark: '#0D2E42',
+    primaryLight: '#2B6E8F',
+    secondary: '#18A999',     // Teal accent
+    accent: '#18A999',        // Same as secondary
+
     success: '#10b981',
     warning: '#f59e0b',
-    error: '#ef4444',
-    info: '#3b82f6',
-    
+    error: '#DC2626',         // Red — error states only
+    info: '#2B6E8F',
+
     background: '#f8fafc',
     surface: '#ffffff',
     card: '#ffffff',
-    
+
     text: '#1e293b',
     textSecondary: '#64748b',
     textLight: '#94a3b8',
     textInverse: '#ffffff',
-    
+
     border: '#e2e8f0',
     borderLight: '#f1f5f9',
-    
+
     overlay: 'rgba(0, 0, 0, 0.5)',
-    
-    // Sensor-specific colors
+
+    // Sensor-specific colors (used in developer mode only)
     temperature: '#f97316',
     ppg: '#ef4444',
-    imu: '#3b82f6',
-    eda: '#8b5cf6',
-    flash: '#6366f1',
-    
+    imu: '#2B6E8F',
+    eda: '#18A999',
+    flash: '#1B4965',
+
     // Sensor subsystem colors
     sensors: {
-      accel: '#3b82f6',
-      gyro: '#8b5cf6',
+      accel: '#2B6E8F',
+      gyro: '#1B4965',
       temp: '#f97316',
-      heart: '#ef4444',
-      eda: '#10b981',
+      heart: '#DC2626',
+      eda: '#18A999',
     },
   },
-  
+
   // Spacing
   spacing: {
     xs: 4,
@@ -56,7 +57,7 @@ export const theme = {
     '3xl': 40,
     '4xl': 48,
   },
-  
+
   // Border Radius
   borderRadius: {
     sm: 6,
@@ -65,7 +66,7 @@ export const theme = {
     xl: 16,
     full: 9999,
   },
-  
+
   // Typography
   typography: {
     h1: {
@@ -109,7 +110,7 @@ export const theme = {
       lineHeight: 24,
     },
   },
-  
+
   // Shadows
   shadows: {
     sm: {

@@ -7,6 +7,7 @@ import {
   ScrollView,
   Dimensions,
   Alert,
+  Platform,
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { useBLE } from '../functionality/BLEContext';
@@ -44,23 +45,23 @@ const sanitizeSensorValue = (value: number, min: number, max: number): number =>
 };
 
 export const WristbandSensorsPanel: React.FC = () => {
-  const { isConnected, connectedDeviceName } = useBLE();
+  const { isConnected, connectedDeviceName, bluetoothState, enableBluetooth } = useBLE();
   const { user } = useAuth();
 
   // Live sensor data from the BLE→Parse→Firebase pipeline
   const { live, session, startSession, stopSession } = useSharedSensorPipeline();
-  
+
   const [isStreaming, setIsStreaming] = useState(false);
   const [useSyntheticData, setUseSyntheticData] = useState(false);
   const [showRawValues, setShowRawValues] = useState(true);
   const [enableFirebaseLogging, setEnableFirebaseLogging] = useState(true);
-  
+
   // Filter settings
   const [filterType, setFilterType] = useState<FilterType>('none');
   const [lowPassCutoff, setLowPassCutoff] = useState(5); // Hz
   const [bandPassLow, setBandPassLow] = useState(0.5); // Hz
   const [bandPassHigh, setBandPassHigh] = useState(10); // Hz
-  
+
   // Sensor data
   const [sensors, setSensors] = useState<Record<SensorType, SensorData>>({
     PPG_IR: { type: 'PPG_IR', label: 'PPG-IR', value: 0, unit: '', color: '#ef4444', buffer: Array(WINDOW_SIZE).fill(0) },
@@ -75,7 +76,7 @@ export const WristbandSensorsPanel: React.FC = () => {
     ACC_Z: { type: 'ACC_Z', label: 'Accel-Z', value: 0, unit: 'mg', color: '#0e7490', buffer: Array(WINDOW_SIZE).fill(0) },
     TEMP: { type: 'TEMP', label: 'Temperature', value: 0, unit: '°C', color: '#f59e0b', buffer: Array(WINDOW_SIZE).fill(0) },
   });
-  
+
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const timeRef = useRef(0);
   const firebaseLogCounterRef = useRef(0);
@@ -85,11 +86,11 @@ export const WristbandSensorsPanel: React.FC = () => {
   const applyLowPassFilter = (data: number[], cutoff: number): number[] => {
     const alpha = cutoff / (cutoff + (1 / (UPDATE_INTERVAL / 1000)));
     const filtered = [data[0]];
-    
+
     for (let i = 1; i < data.length; i++) {
       filtered[i] = alpha * data[i] + (1 - alpha) * filtered[i - 1];
     }
-    
+
     return filtered;
   };
 
@@ -98,7 +99,7 @@ export const WristbandSensorsPanel: React.FC = () => {
     // First apply high-pass (subtract low-pass)
     const lowPassResult = applyLowPassFilter(data, low);
     const highPassResult = data.map((val, idx) => val - lowPassResult[idx]);
-    
+
     // Then apply low-pass to high-pass result
     return applyLowPassFilter(highPassResult, high);
   };
@@ -119,40 +120,40 @@ export const WristbandSensorsPanel: React.FC = () => {
   const generateSyntheticSensorData = useCallback(() => {
     const t = timeRef.current;
     const newSensors = { ...sensors };
-    
+
     // PPG signals (simulate heartbeat ~60-80 BPM)
     const heartRate = 70;
     const ppgBase = 1000 + 200 * Math.sin(2 * Math.PI * (heartRate / 60) * t);
-    newSensors.PPG_IR.value = ppgBase + Math.random() * 20;
-    newSensors.PPG_RED.value = ppgBase * 0.8 + Math.random() * 15;
+    newSensors.PPG_IR.value = 0;
+    newSensors.PPG_RED.value = 0;
     newSensors.PPG_GREEN.value = ppgBase * 0.6 + Math.random() * 10;
-    
+
     // EDA (slowly varying)
     newSensors.EDA.value = 5 + 2 * Math.sin(0.1 * t) + Math.random() * 0.5;
-    
+
     // Gyroscope (simulate small movements)
     newSensors.GYRO_X.value = 10 * Math.sin(0.5 * t) + Math.random() * 5;
     newSensors.GYRO_Y.value = 8 * Math.cos(0.7 * t) + Math.random() * 4;
     newSensors.GYRO_Z.value = 5 * Math.sin(0.3 * t) + Math.random() * 3;
-    
+
     // Accelerometer (simulate gravity + small movements)
     newSensors.ACC_X.value = 0.1 + 0.2 * Math.sin(0.4 * t) + Math.random() * 0.05;
     newSensors.ACC_Y.value = 0.05 + 0.15 * Math.cos(0.6 * t) + Math.random() * 0.03;
     newSensors.ACC_Z.value = 1.0 + 0.1 * Math.sin(0.2 * t) + Math.random() * 0.02; // Mostly gravity
-    
+
     // Temperature (slowly varying body temp)
     newSensors.TEMP.value = 36.5 + 0.3 * Math.sin(0.05 * t) + Math.random() * 0.1;
-    
+
     // Update buffers
     Object.keys(newSensors).forEach((key) => {
       const sensorKey = key as SensorType;
       const sensor = newSensors[sensorKey];
       sensor.buffer = [...sensor.buffer.slice(1), sensor.value];
     });
-    
+
     setSensors(newSensors);
     timeRef.current += UPDATE_INTERVAL / 1000;
-    
+
     // Optional Firebase logging (throttled)
     if (enableFirebaseLogging && user) {
       firebaseLogCounterRef.current++;
@@ -192,8 +193,8 @@ export const WristbandSensorsPanel: React.FC = () => {
 
       // PPG (MAX30101)
       if (live.ppg.lastUpdated) {
-        const ir = sanitizeSensorValue(live.ppg.ir, 0, 400000);
-        const red = sanitizeSensorValue(live.ppg.red, 0, 400000);
+        const ir = 0;
+        const red = 0;
         const green = sanitizeSensorValue(live.ppg.green, 0, 400000);
         updated.PPG_IR = { ...updated.PPG_IR, value: ir, buffer: [...updated.PPG_IR.buffer.slice(1), ir] };
         updated.PPG_RED = { ...updated.PPG_RED, value: red, buffer: [...updated.PPG_RED.buffer.slice(1), red] };
@@ -234,11 +235,11 @@ export const WristbandSensorsPanel: React.FC = () => {
   useEffect(() => {
     if (isStreaming && useSyntheticData) {
       timeRef.current = 0;
-      
+
       intervalRef.current = setInterval(() => {
         generateSyntheticSensorData();
       }, UPDATE_INTERVAL);
-      
+
       return () => {
         if (intervalRef.current) {
           clearInterval(intervalRef.current);
@@ -364,11 +365,11 @@ export const WristbandSensorsPanel: React.FC = () => {
       <View style={styles.sensorGrid}>
         {sensorTypes.map((sensorType) => {
           const sensor = sensors[sensorType];
-          
+
           // Format IMU values as integers (0 decimals), others with appropriate precision
           const isIMUData = sensorType.startsWith('GYRO_') || sensorType.startsWith('ACC_');
           const decimals = isIMUData ? 0 : 5;
-          
+
           return (
             <View
               key={sensorType}
@@ -417,7 +418,7 @@ export const WristbandSensorsPanel: React.FC = () => {
               {isStreaming ? '⏸ Stop' : '▶ Start'}
             </Text>
           </TouchableOpacity>
-          
+
           <TouchableOpacity
             style={[styles.controlButton, styles.secondaryButton]}
             onPress={handleClear}
@@ -426,13 +427,23 @@ export const WristbandSensorsPanel: React.FC = () => {
             <Text style={styles.controlButtonText}>🗑 Clear</Text>
           </TouchableOpacity>
         </View>
-        
+
         {/* Connection & Firebase status */}
         {!isConnected && (
-          <View style={[styles.settingRow, { marginTop: 4 }]}>
-            <Text style={{ fontSize: 13, color: '#ef4444', fontWeight: '600' }}>
+          <View style={[styles.settingRow, { marginTop: 4, flexDirection: 'column', alignItems: 'stretch' }]}>
+            <Text style={{ fontSize: 13, color: '#ef4444', fontWeight: '600', textAlign: 'center', marginBottom: bluetoothState === 'PoweredOff' ? 8 : 0 }}>
               ⚠️  Not connected — go to Devices tab to pair SMARTWATCH
             </Text>
+            {bluetoothState === 'PoweredOff' && (
+              <TouchableOpacity
+                style={[styles.controlButton, { backgroundColor: Platform.OS === 'android' ? '#3b82f6' : '#ef4444', width: '100%' }]}
+                onPress={enableBluetooth}
+              >
+                <Text style={styles.controlButtonText}>
+                  {Platform.OS === 'android' ? '🔵 Turn On Bluetooth' : '⚙️ Open Bluetooth Settings'}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
 
@@ -446,18 +457,18 @@ export const WristbandSensorsPanel: React.FC = () => {
       </View>
 
       {/* Waveform Displays */}
-      
+
       {/* PPG Waveforms - All 3 sensors */}
       <View style={styles.waveformCard}>
         <View style={styles.waveformHeader}>
           <Text style={styles.waveformTitle}>📊 PPG-IR Waveform</Text>
           <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' : 
-             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+            {filterType === 'none' ? 'Raw' :
+              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+                `BP ${bandPassLow}-${bandPassHigh}Hz`}
           </Text>
         </View>
-        
+
         <View style={styles.chartContainer}>
           <LineChart
             data={createPPGChartData()}
@@ -509,12 +520,12 @@ export const WristbandSensorsPanel: React.FC = () => {
         <View style={styles.waveformHeader}>
           <Text style={styles.waveformTitle}>📊 Acc & Gyro</Text>
           <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' : 
-             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+            {filterType === 'none' ? 'Raw' :
+              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+                `BP ${bandPassLow}-${bandPassHigh}Hz`}
           </Text>
         </View>
-        
+
         <View style={styles.chartContainer}>
           <LineChart
             data={createAccGyroChartData()}
@@ -564,12 +575,12 @@ export const WristbandSensorsPanel: React.FC = () => {
         <View style={styles.waveformHeader}>
           <Text style={styles.waveformTitle}>📊 EDA</Text>
           <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' : 
-             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+            {filterType === 'none' ? 'Raw' :
+              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+                `BP ${bandPassLow}-${bandPassHigh}Hz`}
           </Text>
         </View>
-        
+
         <View style={styles.chartContainer}>
           <LineChart
             data={createEDAChartData()}
@@ -628,12 +639,12 @@ export const WristbandSensorsPanel: React.FC = () => {
         <View style={styles.waveformHeader}>
           <Text style={styles.waveformTitle}>📊 Temp</Text>
           <Text style={styles.filterBadge}>
-            {filterType === 'none' ? 'Raw' : 
-             filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
-             `BP ${bandPassLow}-${bandPassHigh}Hz`}
+            {filterType === 'none' ? 'Raw' :
+              filterType === 'lowpass' ? `LP ${lowPassCutoff}Hz` :
+                `BP ${bandPassLow}-${bandPassHigh}Hz`}
           </Text>
         </View>
-        
+
         <View style={styles.chartContainer}>
           <LineChart
             data={createTempChartData()}
@@ -690,7 +701,7 @@ export const WristbandSensorsPanel: React.FC = () => {
       {/* Filter Controls */}
       <View style={styles.filterCard}>
         <Text style={styles.filterTitle}>🔧 Signal Filtering</Text>
-        
+
         <View style={styles.filterTypeRow}>
           <TouchableOpacity
             style={[styles.filterButton, filterType === 'none' && styles.filterButtonActive]}
@@ -700,7 +711,7 @@ export const WristbandSensorsPanel: React.FC = () => {
               No Filter
             </Text>
           </TouchableOpacity>
-          
+
           <TouchableOpacity
             style={[styles.filterButton, filterType === 'lowpass' && styles.filterButtonActive]}
             onPress={() => setFilterType('lowpass')}
@@ -709,7 +720,7 @@ export const WristbandSensorsPanel: React.FC = () => {
               Low-Pass
             </Text>
           </TouchableOpacity>
-          
+
           <TouchableOpacity
             style={[styles.filterButton, filterType === 'bandpass' && styles.filterButtonActive]}
             onPress={() => setFilterType('bandpass')}
@@ -719,7 +730,7 @@ export const WristbandSensorsPanel: React.FC = () => {
             </Text>
           </TouchableOpacity>
         </View>
-        
+
         {filterType === 'lowpass' && (
           <View style={styles.filterParams}>
             <View style={styles.paramRow}>
@@ -741,7 +752,7 @@ export const WristbandSensorsPanel: React.FC = () => {
             </View>
           </View>
         )}
-        
+
         {filterType === 'bandpass' && (
           <View style={styles.filterParams}>
             <View style={styles.paramRow}>
@@ -761,7 +772,7 @@ export const WristbandSensorsPanel: React.FC = () => {
                 </TouchableOpacity>
               </View>
             </View>
-            
+
             <View style={styles.paramRow}>
               <Text style={styles.paramLabel}>High: {bandPassHigh} Hz</Text>
               <View style={styles.paramButtons}>
@@ -799,7 +810,7 @@ export const WristbandSensorsPanel: React.FC = () => {
           • PPG: Photoplethysmography for heart rate{'\n'}
           • EDA: Electrodermal Activity (skin conductance){'\n'}
           • IMU: 9-axis motion tracking (gyro + accelerometer){'\n'}
-          • Sampling Rate: {1000/UPDATE_INTERVAL} Hz{'\n'}
+          • Sampling Rate: {1000 / UPDATE_INTERVAL} Hz{'\n'}
           • Window: {WINDOW_SIZE} samples (~{(WINDOW_SIZE * UPDATE_INTERVAL / 1000).toFixed(1)}s)
         </Text>
       </View>

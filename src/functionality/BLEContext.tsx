@@ -1,15 +1,18 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { unstable_batchedUpdates } from 'react-native';
-import { Platform, PermissionsAndroid } from 'react-native';
+import { Platform, PermissionsAndroid, Linking } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Device } from 'react-native-ble-plx';
-import { bleService, BLEDevice } from '../functionality/BLEService';
-import { 
-  BLEProtocol, 
-  BLEProtocolType, 
+import { bleService, sharedBleManager, BLEDevice } from '../functionality/BLEService';
+import { earbudService } from '../functionality/EarbudService';
+import { teardownGuard } from '../functionality/BLETeardown';
+import {
+  BLEProtocol,
+  BLEProtocolType,
   SUPPORTED_PROTOCOLS,
   NORDIC_UART_PROTOCOL,
-  ESP32_PROTOCOL 
+  ESP32_PROTOCOL,
+  ESP_SIGNAL_CTRL_PROTOCOL
 } from './BLEProtocols';
 
 // Always use real BLE service
@@ -20,6 +23,7 @@ const LAST_DEVICE_KEY = 'ble_last_connected_device';
 interface BLEContextType {
   // State
   isScanning: boolean;
+  isConnecting: boolean;
   isConnected: boolean;
   discoveredDevices: BLEDevice[];
   connectedDevice: Device | null;
@@ -29,17 +33,30 @@ interface BLEContextType {
   currentProtocol: BLEProtocol;
   availableProtocols: BLEProtocol[];
   selectedProtocols: BLEProtocol[];
-  
+  bluetoothState: string;
+
+  // Earbud state
+  isEarbudConnected: boolean;
+  isEarbudConnecting: boolean;
+
+  // Unified connection state
+  isAnyDeviceConnected: boolean;
+  activeDeviceId: string | undefined;
+  activeDeviceName: string | undefined;
+
   // Actions
   startScan: () => Promise<void>;
   stopScan: () => void;
-  connectToDevice: (deviceId: string) => Promise<void>;
+  connectToDeviceRouter: (deviceId: string) => Promise<void>;
   disconnectDevice: () => Promise<void>;
+  disconnectEarbud: () => Promise<void>;
+  disconnectAll: () => Promise<void>;
   sendCommand: (command: string) => Promise<void>;
   clearMessages: () => void;
   requestPermissions: () => Promise<boolean>;
   setProtocolFilter: (protocols: BLEProtocol[]) => void;
   toggleProtocol: (protocol: BLEProtocol) => void;
+  enableBluetooth: () => Promise<boolean>;
 }
 
 const BLEContext = createContext<BLEContextType | undefined>(undefined);
@@ -58,6 +75,7 @@ interface BLEProviderProps {
 
 export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   const [isScanning, setIsScanning] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [discoveredDevices, setDiscoveredDevices] = useState<BLEDevice[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
@@ -67,11 +85,41 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
   const [currentProtocol, setCurrentProtocol] = useState<BLEProtocol>(NORDIC_UART_PROTOCOL);
   const [selectedProtocols, setSelectedProtocols] = useState<BLEProtocol[]>(SUPPORTED_PROTOCOLS);
   const [autoConnectAttempted, setAutoConnectAttempted] = useState(false);
+  const [bluetoothState, setBluetoothState] = useState<string>('Unknown');
+  const EARBUD_MAC = '3C:0F:02:D7:2E:05';
+
+  // Earbud connection state (independent of wristband)
+  const [isEarbudConnected, setIsEarbudConnected] = useState(false);
+  const [isEarbudConnecting, setIsEarbudConnecting] = useState(false);
+
   const isMountedRef = React.useRef(true);
   const disconnectInFlightRef = React.useRef(false);
 
   // Auto-connect on startup
   useEffect(() => {
+    earbudService.resetState();
+
+    // Wire earbud data into the same pipeline as wristband data
+    // Earbud data flows through identical message routing as wristband
+    earbudService.setDataCallback((rawLine: string) => {
+      if (!isMountedRef.current) return;
+      const timestamp = new Date().toLocaleTimeString();
+      const message = `[${timestamp}] RX: ${rawLine}`;
+      console.log('[BLEContext] 🎧 Earbud data:', message);
+      // Add to same message stream as wristband data
+      // Parser/Pipeline will identify this as earbud data by content (no special handling needed)
+      setReceivedMessages((prev) =>
+        prev.length >= 2000 ? [...prev.slice(-1999), message] : [...prev, message]
+      );
+    });
+
+    earbudService.setOnDisconnect(() => {
+      if (!isMountedRef.current) return;
+      unstable_batchedUpdates(() => {
+        setIsEarbudConnected(false);
+      });
+    });
+
     // Initialize BLE service
     const initBLE = async () => {
       setStatusMessage('Initializing Bluetooth...');
@@ -79,6 +127,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
       if (initialized) {
         // Check current Bluetooth state
         const state = await bleService.getBluetoothState();
+        setBluetoothState(state);
         if (state === 'PoweredOn') {
           setStatusMessage('✓ Bluetooth ready');
           // Auto-connect removed - user must manually scan
@@ -93,6 +142,26 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     };
 
     initBLE();
+
+    // Polling interval to ensure state is kept in sync
+    const pollInterval = setInterval(async () => {
+      try {
+        const state = await bleService.getBluetoothState();
+        setBluetoothState(state);
+      } catch (err) {
+        console.error('[BLEContext] Error polling Bluetooth state:', err);
+      }
+    }, 2000);
+
+    // Also subscribe to manager onStateChange
+    const stateSubscription = sharedBleManager.onStateChange((state) => {
+      setBluetoothState(state);
+      if (state === 'PoweredOn') {
+        setStatusMessage('✓ Bluetooth ready');
+      } else if (state === 'PoweredOff') {
+        setStatusMessage('⚠️ Bluetooth is OFF. Please enable Bluetooth.');
+      }
+    }, true);
 
     // Setup callbacks
     bleService.setDataCallback((data: string) => {
@@ -143,9 +212,11 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     // Cleanup on unmount
     return () => {
       isMountedRef.current = false;
-      bleService.setDataCallback(() => {});
-      bleService.setConnectionCallback(() => {});
-      bleService.setErrorCallback(() => {});
+      clearInterval(pollInterval);
+      stateSubscription.remove();
+      bleService.setDataCallback(() => { });
+      bleService.setConnectionCallback(() => { });
+      bleService.setErrorCallback(() => { });
       bleService.destroy();
     };
   }, []);
@@ -154,15 +225,17 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     if (Platform.OS === 'android') {
       try {
         if (Platform.Version >= 31) {
-          // Android 12+ requires BLUETOOTH_SCAN and BLUETOOTH_CONNECT
+          // Android 12+ requires BLUETOOTH_SCAN, BLUETOOTH_CONNECT, and ACCESS_FINE_LOCATION
           const granted = await PermissionsAndroid.requestMultiple([
             PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
             PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           ]);
 
           return (
             granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED &&
-            granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED
+            granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED &&
+            granted['android.permission.ACCESS_FINE_LOCATION'] === PermissionsAndroid.RESULTS.GRANTED
           );
         } else {
           // Android 11 and below
@@ -232,7 +305,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
       setIsScanning(false);
       if (foundDevice) {
         console.log('[BLEContext] Connecting to last device...');
-        await connectToDevice(foundDevice.id);
+        await connectToDeviceRouter(foundDevice.id);
       } else {
         console.log('[BLEContext] Last device not found during auto-connect scan');
         setStatusMessage('Last device not found. Please scan manually.');
@@ -244,7 +317,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     // First check if Bluetooth is enabled
     const state = await bleService.getBluetoothState();
     console.log('[BLEContext] Bluetooth state:', state);
-    
+
     if (state !== 'PoweredOn') {
       let message = 'Bluetooth is not available';
       if (state === 'PoweredOff') {
@@ -283,21 +356,8 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
             return (a.name || '').localeCompare(b.name || '');
           });
         });
-      },
-      10 // scan for 10 seconds
+      }
     );
-
-    // Update scanning status after scan completes
-    setTimeout(() => {
-      setIsScanning(false);
-      setStatusMessage((prevMsg) => {
-        // Only update if we're still showing scanning message
-        if (prevMsg.includes('Scanning')) {
-          return `Scan complete`;
-        }
-        return prevMsg;
-      });
-    }, 10500); // Slightly longer than scan duration to ensure callback finishes
   };
 
   const stopScan = () => {
@@ -307,66 +367,178 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     setStatusMessage('Scan stopped');
   };
 
-  const connectToDevice = async (deviceId: string) => {
-    console.log('[BLEContext] Attempting to connect to device:', deviceId);
-    setStatusMessage('Connecting...');
-    const success = await bleService.connect(deviceId);
-    if (!success) {
-      setStatusMessage('Connection failed');
+  const connectToDeviceRouter = async (deviceId: string) => {
+    const isEarbud = deviceId === EARBUD_MAC ||
+      (deviceId && discoveredDevices.find(d => d.id === deviceId)?.name?.toUpperCase().includes('ESP'));
+
+    console.log(`[Router] ${deviceId} → ${isEarbud ? 'EarbudService 🎧' : 'BLEService ⌚'}`);
+
+    if (isEarbud) {
+      if (isEarbudConnected) {
+        const stillAlive = await sharedBleManager.isDeviceConnected(deviceId).catch(() => false);
+        if (stillAlive) {
+          console.log('[Router] Earbud genuinely still connected.');
+          return;
+        } else {
+          console.log('[Router] isEarbudConnected was true but device is gone — resetting...');
+          setIsEarbudConnected(false);
+          await earbudService.resetState();
+        }
+      }
+      setIsEarbudConnecting(true);
+      try {
+        const success = await earbudService.connect(deviceId);
+        console.log('[Router] earbudService result:', success);
+        setIsEarbudConnected(success);
+        if (success) {
+          // Earbud IS the ESP_SIGNAL_CTRL, set protocol accordingly
+          setCurrentProtocol(ESP_SIGNAL_CTRL_PROTOCOL);
+          console.log('[Router] 🎧 Earbud connected, protocol set to ESP_SIGNAL_CTRL');
+        }
+      } catch (e) {
+        console.error('[Router] earbudService error:', e);
+        setIsEarbudConnected(false);
+      } finally {
+        setIsEarbudConnecting(false);
+      }
+    } else {
+      if (connectedDevice?.id === deviceId) {
+        console.log('[Router] Watch already connected.');
+        return;
+      }
+      setIsConnecting(true);
+      try {
+        await bleService.connect(deviceId);
+        // Connection state is handled entirely by setConnectionCallback above
+        // Do NOT pass an inline callback here — it creates a second unguarded handler
+      } catch (e) {
+        console.error('[Router] bleService error:', e);
+      } finally {
+        setIsConnecting(false);
+      }
     }
   };
 
   const disconnectDevice = async () => {
-    if (disconnectInFlightRef.current) {
-      console.log('[BLEContext] Disconnect already in progress, ignoring duplicate request');
+    console.log('[BLEContext] 🔌 Starting watch disconnect...');
+
+    // Activate global teardown guard — silences all data callbacks instantly
+    teardownGuard.begin();
+
+    try {
+      // Stop session first
+      // (keep your existing session stop code here)
+
+      // ONLY disconnect the watch — never touch earbudService here
+      if (bleService.isCurrentlyConnected()) {
+        await bleService.disconnect();
+      }
+
+      // Batch all state updates — prevents multiple re-renders during teardown
+      unstable_batchedUpdates(() => {
+        setIsConnected(false);
+        setIsConnecting(false);
+        setConnectedDevice(null);
+        setConnectedDeviceName(null);
+        setStatusMessage('Wristband disconnected');
+      });
+
+      console.log('[BLEContext] ✅ Watch disconnect complete');
+    } catch (e) {
+      console.log('[BLEContext] Watch disconnect error:', e);
+      unstable_batchedUpdates(() => {
+        setIsConnected(false);
+        setConnectedDevice(null);
+      });
+    } finally {
+      // ALWAYS release teardown guard — even if something threw
+      teardownGuard.end();
+    }
+  };
+
+  const disconnectEarbud = async () => {
+    console.log('[BLEContext] 🔌 Disconnecting earbud...');
+    teardownGuard.begin();
+
+    try {
+      earbudService.setDataCallback(() => { });
+      await earbudService.disconnect();
+
+      unstable_batchedUpdates(() => {
+        setIsEarbudConnected(false);
+        setIsEarbudConnecting(false);
+      });
+
+      console.log('[BLEContext] ✅ Earbud disconnect complete');
+    } catch (e) {
+      console.log('[BLEContext] Earbud disconnect error:', e);
+      setIsEarbudConnected(false);
+    } finally {
+      teardownGuard.end();
+    }
+  };
+
+  const disconnectAll = async () => {
+    // Prevent double-calls
+    if (teardownGuard.isTearingDown) {
+      console.log('[BLEContext] disconnectAll already in progress, skipping');
       return;
     }
 
-    disconnectInFlightRef.current = true;
-    console.log('[BLEContext] 🔌 Starting BLE disconnect sequence...');
-    
+    // Kill data callbacks FIRST before anything else runs
+    earbudService.setDataCallback(() => { });
+
+    console.log('[BLEContext] 🔌 Disconnecting all devices...');
+    teardownGuard.begin();
+
     try {
-      // Attempt graceful disconnect with timeout protection
-      console.log('[BLEContext] Calling bleService.disconnect()...');
-      try {
-        // Wrap disconnect in timeout to prevent hanging
-        await Promise.race([
-          bleService.disconnect(),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('BLE disconnect timeout')), 15000)
-          )
-        ]);
-        console.log('[BLEContext] ✅ BLE disconnect completed successfully');
-      } catch (bleErr: any) {
-        console.warn('[BLEContext] ⚠️  BLE disconnect error (will force state reset):', bleErr?.message || bleErr);
-        // Even if BLE disconnect fails, continue to next step
+      // 1. Session stop — keep your existing session stop code here
+
+      // 2. Earbud first
+      if (isEarbudConnected) {
+        console.log('[BLEContext] Stopping earbud...');
+        await earbudService.disconnect();
       }
 
-      // State is updated via the connectionCallback registered above.
-      // DO NOT call setIsConnected/setConnectedDevice here — doing so fires
-      // a second React state update and can cause a render-loop crash on Android.
-    } catch (err: any) {
-      console.error('[BLEContext] ❌ Unexpected error during disconnect:', err?.message || err);
-    } finally {
-      // CRITICAL: Always ensure state is cleared to avoid app hanging
-      try {
-        console.log('[BLEContext] Forcing React state reset...');
+      // 4. Watch second
+      if (bleService.isCurrentlyConnected()) {
+        console.log('[BLEContext] Stopping watch...');
+        await bleService.disconnect();
+      }
+
+      // 5. Batch state reset
+      unstable_batchedUpdates(() => {
         setIsConnected(false);
+        setIsEarbudConnected(false);
+        setIsConnecting(false);
+        setIsEarbudConnecting(false);
         setConnectedDevice(null);
         setConnectedDeviceName(null);
         setStatusMessage('Disconnected');
-        console.log('[BLEContext] ✅ React state cleared');
-      } catch (stateErr: any) {
-        console.error('[BLEContext] ❌ Failed to clear state:', stateErr?.message || stateErr);
-      }
+      });
 
-      // Allow new disconnect requests
-      disconnectInFlightRef.current = false;
-      console.log('[BLEContext] ✅ Disconnect sequence complete');
+      console.log('[BLEContext] ✅ All disconnected');
+    } catch (e) {
+      console.log('[BLEContext] disconnectAll error:', e);
+      unstable_batchedUpdates(() => {
+        setIsConnected(false);
+        setIsEarbudConnected(false);
+        setConnectedDevice(null);
+      });
+    } finally {
+      teardownGuard.end();
     }
   };
 
   const sendCommand = async (command: string) => {
+    // Route to earbud if connected, otherwise to wristband
+    if (isEarbudConnected) {
+      console.log('[BLEContext] 🎧 Routing command to EarbudService:', command);
+      const success = await earbudService.sendCommand(command);
+      console.log('[BLEContext] Command sent, waiting for device response...');
+      return;
+    }
+
     if (!isConnected) {
       setStatusMessage('Not connected to any device');
       return;
@@ -374,15 +546,11 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
 
     // ESP/NUS firmwares in this project parse line-based commands terminated by '\n'.
     const dataToSend = command.endsWith('\n') ? command : `${command}\n`;
-    
+
     console.log('[BLEContext] Sending command:', JSON.stringify(dataToSend));
     const success = await bleService.sendData(dataToSend, true); // true = with response (Python default)
-    
-    if (success) {
-      const timestamp = new Date().toLocaleTimeString();
-      const message = `[${timestamp}] TX: ${command}`;
-      setReceivedMessages((prev) => [...prev, message]);
-    } else {
+
+    if (!success) {
       setStatusMessage('Failed to send command');
     }
   };
@@ -401,7 +569,7 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     setSelectedProtocols(prev => {
       const isSelected = prev.some(p => p.type === protocol.type);
       let newSelection: BLEProtocol[];
-      
+
       if (isSelected) {
         // Remove protocol (but ensure at least one remains)
         newSelection = prev.filter(p => p.type !== protocol.type);
@@ -413,15 +581,60 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
         // Add protocol
         newSelection = [...prev, protocol];
       }
-      
+
       bleService.setProtocolFilter(newSelection);
       console.log('[BLEContext] Protocols toggled. Active:', newSelection.map(p => p.name).join(', '));
       return newSelection;
     });
   };
 
+  const enableBluetooth = async (): Promise<boolean> => {
+    if (Platform.OS === 'android') {
+      const granted = await requestPermissions();
+      if (!granted) {
+        setStatusMessage('⚠️ Bluetooth permissions denied.');
+        return false;
+      }
+      setStatusMessage('Enabling Bluetooth...');
+      
+      // Enforce a 3.5 second timeout on BleManager.enable() to prevent emulator/system hangs
+      const enablePromise = bleService.enableBluetooth();
+      const timeoutPromise = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3500));
+      
+      const success = await Promise.race([enablePromise, timeoutPromise]);
+      
+      if (success) {
+        setBluetoothState('PoweredOn');
+        setStatusMessage('✓ Bluetooth enabled');
+        return true;
+      } else {
+        console.log('[BLEContext] enableBluetooth timed out or failed. Falling back to Bluetooth Settings intent...');
+        setStatusMessage('Opening settings...');
+        try {
+          await Linking.sendIntent('android.settings.BLUETOOTH_SETTINGS');
+        } catch (_) {
+          try {
+            await Linking.openSettings();
+          } catch (err) {
+            console.error('[BLEContext] Failed to open settings:', err);
+          }
+        }
+        return false;
+      }
+    } else {
+      try {
+        await Linking.openSettings();
+        return true;
+      } catch (err) {
+        console.error('[BLEContext] Failed to open settings:', err);
+        return false;
+      }
+    }
+  };
+
   const value: BLEContextType = {
     isScanning,
+    isConnecting,
     isConnected,
     discoveredDevices,
     connectedDevice,
@@ -431,15 +644,25 @@ export const BLEProvider: React.FC<BLEProviderProps> = ({ children }) => {
     currentProtocol,
     availableProtocols: SUPPORTED_PROTOCOLS,
     selectedProtocols,
+    isEarbudConnected,
+    isEarbudConnecting,
+    bluetoothState,
+    // Unified connection state
+    isAnyDeviceConnected: isConnected || isEarbudConnected,
+    activeDeviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
+    activeDeviceName: connectedDevice?.name ?? (isEarbudConnected ? 'ESP_SIGNAL_CTRL' : undefined),
     startScan,
     stopScan,
-    connectToDevice,
+    connectToDeviceRouter,
     disconnectDevice,
+    disconnectEarbud,
+    disconnectAll,
     sendCommand,
     clearMessages,
     requestPermissions,
     setProtocolFilter,
     toggleProtocol,
+    enableBluetooth,
   };
 
   return <BLEContext.Provider value={value}>{children}</BLEContext.Provider>;

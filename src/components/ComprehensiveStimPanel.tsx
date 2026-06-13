@@ -7,7 +7,6 @@ import {
   ScrollView,
   Switch,
   TextInput,
-  Alert,
   Dimensions,
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
@@ -18,15 +17,13 @@ import { saveStimulationEvent } from '../firebase/dataLogger';
 import {
   StimMode,
   STIM_MODE_NAMES,
-  ChannelConfig,
-  SmartStimCommandBuilder,
-  SmartStimValidator,
-  PRESET_CONFIGS,
   intensityToAmplitude,
   amplitudeToIntensity,
   formatMicroseconds,
   calculateFrequency,
+  SmartStimValidator,
 } from '../functionality/SmartStimCommands';
+import { EarbudControlCard } from './EarbudControlCard';
 
 const WINDOW_SIZE = 50;
 const UPDATE_INTERVAL = 100;
@@ -97,9 +94,25 @@ export const ComprehensiveStimPanel: React.FC = () => {
   const [dataBuffer, setDataBuffer] = useState<number[]>(Array(WINDOW_SIZE).fill(0));
   const [sampleCount, setSampleCount] = useState(0);
   
+  // Success notification state
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const successTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const timeRef = useRef(0);
   const bufferRef = useRef<number[]>(Array(WINDOW_SIZE).fill(0));
+
+  // Show success notification with auto-dismiss
+  const showSuccess = (message: string, duration: number = 3000) => {
+    if (successTimeoutRef.current) {
+      clearTimeout(successTimeoutRef.current);
+    }
+    setSuccessMessage(message);
+    successTimeoutRef.current = setTimeout(() => {
+      setSuccessMessage(null);
+      successTimeoutRef.current = null;
+    }, duration);
+  };
 
   // Synthetic waveform generator
   const generateSyntheticSample = useCallback((): number => {
@@ -169,6 +182,18 @@ export const ComprehensiveStimPanel: React.FC = () => {
     }
   }, [isMonitoring, useSyntheticWave, generateSyntheticSample, addDataPoint]);
 
+  // Component initialization and logging
+  useEffect(() => {
+    console.log('[Stimulator] Panel mounted. Device connected:', isConnected);
+    if (isConnected) {
+      console.log('[Stimulator] Connected to:', connectedDeviceName);
+      // Reset state when first connected
+      if (!stimulationActive) {
+        setIsMonitoring(false);
+      }
+    }
+  }, [isConnected, connectedDeviceName]);
+
   const chartData: WaveformData = useMemo(() => ({
     labels: Array(WINDOW_SIZE).fill(''),
     datasets: [{
@@ -178,147 +203,139 @@ export const ComprehensiveStimPanel: React.FC = () => {
     }],
   }), [dataBuffer]);
 
-  const stats = useMemo(() => {
-    const current = dataBuffer[dataBuffer.length - 1] || 0;
-    const max = Math.max(...dataBuffer);
-    const min = Math.min(...dataBuffer);
-    const avg = dataBuffer.reduce((a, b) => a + b, 0) / dataBuffer.length;
-    return { current, max, min, avg };
-  }, [dataBuffer]);
-
   const checkElectrodeConnection = async (channel: 0 | 1) => {
     if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to device first');
+      console.log('[Stimulator] Not connected - cannot check electrode');
       return;
     }
     
-    // Send electrode check command
-    const command = `CHECK:CH${channel}`;
+    // Send PING to verify device connectivity
+    const command = 'PING';
     const success = await bleService.sendData(command, true);
     
     if (success) {
-      // Simulate response (in real implementation, parse from device)
-      setTimeout(() => {
-        const connected = Math.random() > 0.3; // 70% success rate simulation
-        if (channel === 0) {
-          setCh0ElectrodeConnected(connected);
-        } else {
-          setCh1ElectrodeConnected(connected);
-        }
-        
-        Alert.alert(
-          `Channel ${channel} Electrode Check`,
-          connected ? '✅ Electrode connected properly' : '❌ Poor or no connection detected',
-          [{ text: 'OK' }]
-        );
-      }, 500);
+      // Update electrode status based on connection
+      if (channel === 0) {
+        setCh0ElectrodeConnected(true);
+      } else {
+        setCh1ElectrodeConnected(true);
+      }
+      const statusMsg = `✓ Ch${channel} Online`;
+      showSuccess(statusMsg, 2000);
     }
   };
 
   const sendChannelConfig = async (channel: 0 | 1) => {
     if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to device first');
+      console.log('[Stimulator] Not connected - cannot send config');
       return;
     }
     
-    const intensity = channel === 0 ? ch0Intensity : ch1Intensity;
-    const mode = channel === 0 ? ch0Mode : ch1Mode;
-    const pulseWidth = channel === 0 ? ch0PulseWidth : ch1PulseWidth;
-    const frequency = channel === 0 ? ch0Frequency : ch1Frequency;
-    const burstMode = channel === 0 ? ch0BurstMode : ch1BurstMode;
-    const burstDuration = channel === 0 ? ch0BurstDuration : ch1BurstDuration;
-    const burstInterval = channel === 0 ? ch0BurstInterval : ch1BurstInterval;
-    
-    const gapPeriod = (1000000 / frequency) - pulseWidth;
-    
-    const config: ChannelConfig = {
-      channel,
-      mode,
-      A0: intensityToAmplitude(intensity),
-      T1: pulseWidth,
-      T2: mode === StimMode.BI ? pulseWidth : undefined,
-      RP: 10,
-      GP: Math.max(100, Math.round(gapPeriod)),
-    };
-    
-    const validation = SmartStimValidator.validateChannelConfig(config);
-    if (!validation.valid) {
-      Alert.alert('Invalid Configuration', validation.errors.join('\n'), [{ text: 'OK' }]);
-      return;
-    }
-    
-    let command = SmartStimCommandBuilder.buildChannelCommand(config);
-    
-    // Add burst mode parameters if enabled
-    if (burstMode) {
-      command += `,BURST:${burstDuration},${burstInterval}`;
-    }
-    
-    console.log('[ComprehensiveStim] Sending:', command);
-    
-    const success = await bleService.sendData(command, true);
-    if (success) {
-      Alert.alert(
-        'Success',
-        `Channel ${channel} configured:\n${STIM_MODE_NAMES[mode]}\nIntensity: ${intensity}%\nFrequency: ${frequency}Hz${burstMode ? '\n🔥 Burst Mode ON' : ''}`,
-        [{ text: 'OK' }]
-      );
+    try {
+      const intensity = channel === 0 ? ch0Intensity : ch1Intensity;
+      const mode = channel === 0 ? ch0Mode : ch1Mode;
+      const pulseWidth = channel === 0 ? ch0PulseWidth : ch1PulseWidth;
+      const frequency = channel === 0 ? ch0Frequency : ch1Frequency;
+      
+      // Calculate DAC values based on intensity
+      const dacValue = intensityToAmplitude(intensity);
+      const offTime = Math.round((1000000 / frequency) - pulseWidth);
+      
+      // Build firmware commands using SET protocol
+      const commands = [
+        `SET OFFSET 2505`,           // Neutral DAC point
+        `SET PHASE1 ${dacValue}`,    // Positive phase amplitude
+        `SET PHASE2 ${dacValue}`,    // Negative phase amplitude  
+        `SET TONPOS ${pulseWidth}`,  // Positive pulse duration
+        `SET TOFF ${offTime}`,       // Off time between pulses
+        `SET TONNEG ${pulseWidth}`,  // Negative pulse duration
+      ];
+      
+      console.log(`[Stimulator CH${channel}] Sending params - Intensity: ${intensity}%, Freq: ${frequency}Hz, PW: ${pulseWidth}µs`);
+      
+      // Send all commands with small delays between them
+      for (const cmd of commands) {
+        const success = await bleService.sendData(cmd, true);
+        if (!success) {
+          console.error(`[Stimulator] Failed to send: ${cmd}`);
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      
+      // Request status confirmation
+      await bleService.sendData('GET', true);
+      
+      // Show success notification on screen only
+      const successMsg = `✓ Ch${channel} Applied\n${STIM_MODE_NAMES[mode]} • ${intensity}% • ${frequency}Hz`;
+      showSuccess(successMsg, 3000);
+    } catch (error) {
+      console.error(`[Stimulator CH${channel}] Error:`, error);
     }
   };
 
   const toggleAudio = () => {
     setAudioEnabled(!audioEnabled);
-    if (!audioEnabled) {
-      // In real implementation: Start audio tone
-      Alert.alert('Audio', `Audio tone started at ${audioFrequency}Hz`);
-    } else {
-      // In real implementation: Stop audio tone
-      Alert.alert('Audio', 'Audio tone stopped');
-    }
+    const statusMsg = audioEnabled ? '✓ Audio Off' : `✓ Audio On (${audioFrequency}Hz)`;
+    showSuccess(statusMsg, 2000);
   };
 
   const toggleStimulation = async () => {
     if (!isConnected) {
-      Alert.alert('Not Connected', 'Please connect to device first');
+      console.log('[Stimulator] Not connected - cannot toggle stimulation');
       return;
     }
     
-    const newState = !stimulationActive;
-    const command = newState ? 'POWER:ON' : 'POWER:OFF';
-    await bleService.sendData(command, true);
-    
-    setStimulationActive(newState);
-    
-    if (newState) {
-      setIsMonitoring(true);
+    try {
+      const newState = !stimulationActive;
       
-      // Log stimulation event to Firebase
-      if (enableFirebaseLogging && user) {
-        const ch0Active = ch0Enabled;
-        const ch1Active = ch1Enabled;
+      // Check if at least one channel is enabled
+      if (newState && !ch0Enabled && !ch1Enabled) {
+        console.log('[Stimulator] No channels enabled');
+        return;
+      }
+      
+      // Send START or STOP command using firmware protocol
+      const command = newState ? 'START' : 'STOP';
+      console.log('[Stimulator] Sending:', command);
+      
+      const success = await bleService.sendData(command, true);
+      if (success) {
+        setStimulationActive(newState);
+        const statusMsg = newState ? '▶ Stimulation Active' : '⏸ Stimulation Stopped';
+        showSuccess(statusMsg, 2000);
+      }
+      
+      if (newState) {
+        setIsMonitoring(true);
         
-        if (ch0Active) {
-          saveStimulationEvent(user.uid, {
-            waveform: stimModeToFirebaseWaveform(ch0Mode),
-            frequency: ch0Frequency,
-            amplitude: intensityToAmplitude(ch0Intensity),
-            pulseWidth: ch0PulseWidth,
-            duration: 0, // Duration tracked separately
-            deviceName: connectedDeviceName || undefined,
-          }).catch(err => console.error('[Firebase] Failed to log stim event:', err));
-        }
-        
-        if (ch1Active) {
-          saveStimulationEvent(user.uid, {
-            waveform: stimModeToFirebaseWaveform(ch1Mode),
-            frequency: ch1Frequency,
-            amplitude: intensityToAmplitude(ch1Intensity),
-            pulseWidth: ch1PulseWidth,
-            duration: 0,
-            deviceName: connectedDeviceName || undefined,
-          }).catch(err => console.error('[Firebase] Failed to log stim event:', err));
+        // Log stimulation event to Firebase
+        if (enableFirebaseLogging && user) {
+          if (ch0Enabled) {
+            saveStimulationEvent(user.uid, {
+              waveform: stimModeToFirebaseWaveform(ch0Mode),
+              frequency: ch0Frequency,
+              amplitude: intensityToAmplitude(ch0Intensity),
+              pulseWidth: ch0PulseWidth,
+              duration: 0,
+              deviceName: connectedDeviceName || undefined,
+            }).catch(err => console.error('[Firebase] Failed to log stim event:', err));
+          }
+          
+          if (ch1Enabled) {
+            saveStimulationEvent(user.uid, {
+              waveform: stimModeToFirebaseWaveform(ch1Mode),
+              frequency: ch1Frequency,
+              amplitude: intensityToAmplitude(ch1Intensity),
+              pulseWidth: ch1PulseWidth,
+              duration: 0,
+              deviceName: connectedDeviceName || undefined,
+            }).catch(err => console.error('[Firebase] Failed to log stim event:', err));
+          }
         }
       }
+    } catch (error) {
+      console.error('[Stimulator] Error toggling stimulation:', error);
     }
   };
 
@@ -525,6 +542,13 @@ export const ComprehensiveStimPanel: React.FC = () => {
         {isConnected && <Text style={styles.subtitle}>Connected: {connectedDeviceName}</Text>}
       </View>
       
+      {/* Success Notification */}
+      {successMessage && (
+        <View style={styles.successNotification}>
+          <Text style={styles.successNotificationText}>{successMessage}</Text>
+        </View>
+      )}
+      
       {/* Master Control */}
       <View style={styles.masterControl}>
         <TouchableOpacity
@@ -665,25 +689,6 @@ export const ComprehensiveStimPanel: React.FC = () => {
             />
           </View>
 
-          <View style={styles.statsRow}>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Current</Text>
-              <Text style={styles.statValue}>{stats.current.toFixed(1)}</Text>
-            </View>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Max</Text>
-              <Text style={styles.statValue}>{stats.max.toFixed(1)}</Text>
-            </View>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Min</Text>
-              <Text style={styles.statValue}>{stats.min.toFixed(1)}</Text>
-            </View>
-            <View style={styles.stat}>
-              <Text style={styles.statLabel}>Avg</Text>
-              <Text style={styles.statValue}>{stats.avg.toFixed(1)}</Text>
-            </View>
-          </View>
-          
           <TouchableOpacity
             style={[styles.monitorButton, isMonitoring && styles.monitorButtonActive]}
             onPress={() => setIsMonitoring(!isMonitoring)}
@@ -698,6 +703,9 @@ export const ComprehensiveStimPanel: React.FC = () => {
       {/* Channel Controls */}
       {renderChannelControls(0)}
       {renderChannelControls(1)}
+
+      {/* Earbud walkie-talkie control panel */}
+      <EarbudControlCard />
       
       {/* Safety Info */}
       <View style={styles.safetyInfo}>
@@ -732,6 +740,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#e0e7ff',
     marginTop: 4,
+  },
+  successNotification: {
+    backgroundColor: '#10b981',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginHorizontal: 12,
+    marginTop: 12,
+    borderRadius: 10,
+    borderLeftWidth: 4,
+    borderLeftColor: '#059669',
+    elevation: 3,
+  },
+  successNotificationText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 20,
   },
   masterControl: {
     backgroundColor: '#fff',

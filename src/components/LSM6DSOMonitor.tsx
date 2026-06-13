@@ -52,7 +52,7 @@ interface AggregatedIMUState {
  * Parses log format: "lsm6dso_app: [LSM6DSO] ACC: X=... Y=... Z=... | GYRO: X=... Y=... Z=..."
  */
 export const LSM6DSOMonitor: React.FC = () => {
-  const { connectedDevice, isConnected } = useBLE();
+  const { connectedDevice, isConnected, isEarbudConnected } = useBLE();
   const { user } = useAuth();
 
   // ───── AGGREGATED STATE (single state update per throttle interval) ─────
@@ -294,8 +294,8 @@ export const LSM6DSOMonitor: React.FC = () => {
                     latestValuesRef.current.gyro.z ** 2
                 ),
               },
-              deviceId: connectedDevice?.id,
-              deviceName: connectedDevice?.name || undefined,
+              deviceId: connectedDevice?.id ?? (isEarbudConnected ? '3C:0F:02:D7:2E:05' : undefined),
+              deviceName: connectedDevice?.name || (isEarbudConnected ? 'ESP_SIGNAL_CTRL' : undefined),
             }).catch(err => console.error('[IMU] ❌ Failed to save:', err));
           }
         }
@@ -307,7 +307,7 @@ export const LSM6DSOMonitor: React.FC = () => {
    * Start monitoring
    */
   const startMonitoring = useCallback(async () => {
-    if (!connectedDevice || !isConnected) return;
+    if (!connectedDevice && !isEarbudConnected) return;
 
     try {
       // Clear any existing subscription

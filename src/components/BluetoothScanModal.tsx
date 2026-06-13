@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useBLE } from '../functionality/BLEContext';
 import { BLEDevice } from '../functionality/BLEService';
+import { BLEProtocolType } from '../functionality/BLEProtocols';
 
 interface BluetoothScanModalProps {
   visible: boolean;
@@ -26,12 +27,17 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
     isConnected,
     discoveredDevices,
     connectedDeviceName,
+    connectedDevice,
     statusMessage,
     startScan,
     stopScan,
-    connectToDevice,
-    disconnectDevice,
+    connectToDeviceRouter,
+    disconnectAll,
+    isEarbudConnected,
+    isEarbudConnecting,
     requestPermissions,
+    bluetoothState,
+    enableBluetooth,
   } = useBLE();
 
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -60,7 +66,7 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
   const handleConnect = async (device: BLEDevice) => {
     try {
       setConnecting(device.id);
-      await connectToDevice(device.id);
+      await connectToDeviceRouter(device.id);
     } catch (err: any) {
       Alert.alert('Connection Failed', err.message || 'Could not connect to device.');
     } finally {
@@ -69,13 +75,14 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
   };
 
   const handleDisconnect = async () => {
-    Alert.alert('Disconnect', 'Disconnect from the current device?', [
+    Alert.alert('Disconnect', 'Disconnect from all devices?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Disconnect',
         style: 'destructive',
         onPress: async () => {
-          await disconnectDevice();
+          console.log('[BluetoothScanModal] Disconnect button tapped — calling disconnectAll');
+          await disconnectAll();
         },
       },
     ]);
@@ -86,70 +93,73 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
     onClose();
   };
 
-  const renderDevice = ({ item }: { item: BLEDevice }) => {
-    const isThisDevice = isConnected && connectedDeviceName === item.name;
-    const isConnecting = connecting === item.id;
-    const name = item.name || 'Unknown Device';
-    const rssi = item.rssi ?? 'N/A';
-    const protocol = item.protocol?.name?.split(' ')[0] ?? '?';
+  const renderDevice = (device: BLEDevice) => {
+    const name = device.name || 'Unknown Device';
+    
+    // Properly determine device type using protocol UUID, not hardcoded MAC/name
+    const isEarbud = device.protocol?.type === BLEProtocolType.ESP_SIGNAL_CTRL;
+    const isWristband = device.protocol?.type === BLEProtocolType.NRF_LOG_SERVICE || 
+                        device.protocol?.type === BLEProtocolType.NORDIC_UART;
 
-    // Signal strength icon
-    let signalIcon: 'cellular' | 'cellular-outline' | 'wifi-outline' = 'cellular-outline';
-    if (item.rssi !== null && item.rssi !== undefined) {
-      if (item.rssi > -60) signalIcon = 'cellular';
-      else if (item.rssi > -80) signalIcon = 'cellular-outline';
+    const isThisConnecting = isEarbud ? isEarbudConnecting : connecting === device.id;
+    const isThisConnected = isEarbud ? isEarbudConnected : connectedDevice?.id === device.id;
+
+    // Use protocol info for label, fallback to device type
+    let deviceLabel = '❓ Unknown Device';
+    if (isEarbud) {
+      deviceLabel = '🎧 ESP Earbud';
+    } else if (isWristband) {
+      deviceLabel = device.protocol?.type === BLEProtocolType.NRF_LOG_SERVICE 
+        ? '⌚ Wristband' 
+        : '⌚ Wristband';
     }
+    
+    const statusColor = isThisConnected ? '#22c55e' : '#6b7280';
+    const statusText = isThisConnecting ? 'Connecting...' : isThisConnected ? 'Connected' : 'Not Connected';
 
     return (
-      <View style={[styles.deviceCard, isThisDevice && styles.deviceCardConnected]}>
-        <View style={styles.deviceLeft}>
-          <View style={[styles.deviceIconBg, isThisDevice && styles.deviceIconBgConnected]}>
-            <Ionicons
-              name={isThisDevice ? 'bluetooth' : 'bluetooth-outline'}
-              size={24}
-              color={isThisDevice ? '#ffffff' : '#5DADE2'}
-            />
+      <View style={styles.deviceCard}>
+        <View style={styles.deviceInfo}>
+          <Text style={styles.deviceName}>{name}</Text>
+          <Text style={styles.deviceType}>{deviceLabel}</Text>
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+            <Text style={[styles.deviceStatusText, { color: statusColor }]}>{statusText}</Text>
           </View>
-          <View style={styles.deviceInfo}>
-            <Text style={[styles.deviceName, isThisDevice && styles.deviceNameConnected]}>
-              {name}
-              {isThisDevice && ' ✓'}
-            </Text>
-            <Text style={styles.deviceMeta}>
-              {item.id.toUpperCase().slice(0, 17)}
-            </Text>
-            <View style={styles.deviceBadges}>
-              <View style={styles.badge}>
-                <Ionicons name={signalIcon} size={12} color="#64748b" />
-                <Text style={styles.badgeText}>{rssi} dBm</Text>
-              </View>
-              {item.protocol && (
-                <View style={[styles.badge, styles.badgeProtocol]}>
-                  <Text style={[styles.badgeText, { color: '#5DADE2' }]}>{protocol}</Text>
-                </View>
-              )}
-            </View>
-          </View>
+          <Text style={styles.deviceMac}>{device.id}</Text>
         </View>
 
-        {isThisDevice ? (
-          <TouchableOpacity style={styles.disconnectBtn} onPress={handleDisconnect}>
-            <Text style={styles.disconnectBtnText}>Disconnect</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity
-            style={[styles.connectBtn, (isConnecting || isConnected) && styles.connectBtnDisabled]}
-            onPress={() => handleConnect(item)}
-            disabled={isConnecting || isConnected}>
-            {isConnecting ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <Text style={styles.connectBtnText}>{isConnected ? 'Busy' : 'Connect'}</Text>
-            )}
-          </TouchableOpacity>
-        )}
+        <View style={styles.buttonCol}>
+          {isThisConnecting ? (
+            <ActivityIndicator color="#1B4965" />
+          ) : isThisConnected ? (
+            <TouchableOpacity
+              style={styles.disconnectBtn}
+              onPress={() => {
+                console.log(`[BluetoothScanModal] Disconnect per-device: ${device.id} isEarbud=${isEarbud}`);
+                disconnectAll();
+              }}
+            >
+              <Text style={styles.disconnectBtnText}>Disconnect</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.connectBtn}
+              onPress={() => {
+                console.log(`[UI] Connect: ${device.id} isEarbud=${isEarbud}`);
+                connectToDeviceRouter(device.id);
+              }}
+            >
+              <Text style={styles.connectBtnText}>Connect</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
     );
+  };
+
+  const renderDeviceItem = ({ item: device }: { item: BLEDevice }) => {
+    return renderDevice(device);
   };
 
   return (
@@ -173,18 +183,18 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
           <Ionicons
             name={isConnected ? 'checkmark-circle' : isScanning ? 'radio-outline' : 'bluetooth'}
             size={18}
-            color={isConnected ? '#10b981' : '#5DADE2'}
+            color={isConnected ? '#10b981' : '#1B4965'}
           />
           <Text style={[styles.statusText, isConnected && styles.statusTextConnected]}>
             {isConnected ? `Connected: ${connectedDeviceName}` : statusMessage}
           </Text>
-          {isScanning && <ActivityIndicator size="small" color="#5DADE2" style={{ marginLeft: 8 }} />}
+          {isScanning && <ActivityIndicator size="small" color="#1B4965" style={{ marginLeft: 8 }} />}
         </View>
 
         {/* Connected Device Banner */}
         {isConnected && (
           <View style={styles.connectedBanner}>
-            <Ionicons name="watch" size={40} color="#5DADE2" />
+            <Ionicons name="watch" size={40} color="#1B4965" />
             <View style={styles.connectedBannerInfo}>
               <Text style={styles.connectedBannerTitle}>{connectedDeviceName}</Text>
               <Text style={styles.connectedBannerSub}>Receiving sensor data</Text>
@@ -194,6 +204,23 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
             </TouchableOpacity>
           </View>
         )}
+
+        {/* Connection Summary */}
+        <View style={styles.connectionSummary}>
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryIcon}>⌚</Text>
+            <Text style={[styles.summaryStatus, { color: isConnected ? '#22c55e' : '#6b7280' }]}>
+              {isConnected ? 'Wristband Connected' : 'Wristband Disconnected'}
+            </Text>
+          </View>
+          <View style={styles.summaryDivider} />
+          <View style={styles.summaryItem}>
+            <Text style={styles.summaryIcon}>🎧</Text>
+            <Text style={[styles.summaryStatus, { color: isEarbudConnected ? '#22c55e' : '#6b7280' }]}>
+              {isEarbudConnected ? 'Earbud Connected' : 'Earbud Disconnected'}
+            </Text>
+          </View>
+        </View>
 
         {/* Scan Controls */}
         <View style={styles.scanControls}>
@@ -222,9 +249,25 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
         {/* Device List */}
         {discoveredDevices.length === 0 ? (
           <View style={styles.emptyState}>
-            {isScanning ? (
+            {bluetoothState === 'PoweredOff' ? (
               <>
-                <ActivityIndicator size="large" color="#5DADE2" />
+                <Ionicons name="bluetooth-outline" size={64} color="#ef4444" />
+                <Text style={styles.emptyTitle}>Bluetooth is OFF</Text>
+                <Text style={styles.emptySubtitle}>
+                  Please turn on Bluetooth to scan and connect devices.
+                </Text>
+                <TouchableOpacity
+                  style={[styles.doneButton, { width: '100%', marginHorizontal: 0, marginTop: 12, backgroundColor: Platform.OS === 'android' ? '#2563eb' : '#ef4444' }]}
+                  onPress={enableBluetooth}
+                >
+                  <Text style={styles.doneButtonText}>
+                    {Platform.OS === 'android' ? 'Turn On Bluetooth' : 'Open Bluetooth Settings'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : isScanning ? (
+              <>
+                <ActivityIndicator size="large" color="#1B4965" />
                 <Text style={styles.emptyTitle}>Searching for devices...</Text>
                 <Text style={styles.emptySubtitle}>Make sure your wristband is powered on and nearby</Text>
               </>
@@ -241,14 +284,19 @@ export const BluetoothScanModal: React.FC<BluetoothScanModalProps> = ({ visible,
         ) : (
           <FlatList
             data={discoveredDevices}
-            keyExtractor={(d) => d.id}
-            renderItem={renderDevice}
-            contentContainerStyle={styles.deviceList}
-            showsVerticalScrollIndicator={false}
+            keyExtractor={(device) => device.id}
+            renderItem={renderDeviceItem}
+            contentContainerStyle={styles.deviceListContent}
+            scrollEnabled={true}
+            showsVerticalScrollIndicator={true}
           />
         )}
 
         {/* Info Footer */}
+        <TouchableOpacity style={styles.doneButton} onPress={handleClose}>
+          <Text style={styles.doneButtonText}>Done (Go to Dashboard)</Text>
+        </TouchableOpacity>
+
         <View style={styles.footer}>
           <Ionicons name="information-circle-outline" size={16} color="#94a3b8" />
           <Text style={styles.footerText}>
@@ -369,7 +417,7 @@ const styles = StyleSheet.create({
   scanBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#5DADE2',
+    backgroundColor: '#1B4965',
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 20,
@@ -401,112 +449,107 @@ const styles = StyleSheet.create({
     paddingBottom: 16,
     gap: 10,
   },
+  deviceListContent: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 16,
+    gap: 10,
+  },
+  connectionSummary: {
+    flexDirection: 'row',
+    backgroundColor: '#12121e',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+    marginHorizontal: 16,
+    alignItems: 'center',
+  },
+  summaryItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  summaryIcon: {
+    fontSize: 20,
+  },
+  summaryStatus: {
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  summaryDivider: {
+    width: 1,
+    height: 30,
+    backgroundColor: '#2e2e3e',
+  },
   deviceCard: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#ffffff',
-    padding: 14,
-    borderRadius: 14,
+    backgroundColor: '#1e1e2e',
+    borderRadius: 12,
+    padding: 16,
+    marginVertical: 6,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
-    marginBottom: 10,
-  },
-  deviceCardConnected: {
-    borderColor: '#10b981',
-    borderWidth: 2,
-    backgroundColor: '#f0fdf4',
-  },
-  deviceLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 12,
-  },
-  deviceIconBg: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#e0f2fe',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  deviceIconBgConnected: {
-    backgroundColor: '#5DADE2',
+    borderColor: '#2e2e3e',
   },
   deviceInfo: {
     flex: 1,
   },
   deviceName: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '600',
-    color: '#1e293b',
-    marginBottom: 2,
+    color: '#ffffff',
   },
-  deviceNameConnected: {
-    color: '#10b981',
-  },
-  deviceMeta: {
+  deviceType: {
     fontSize: 12,
-    color: '#94a3b8',
-    marginBottom: 4,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: '#a0a0b0',
+    marginTop: 2,
   },
-  deviceBadges: {
-    flexDirection: 'row',
-    gap: 6,
-  },
-  badge: {
+  statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f1f5f9',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    gap: 3,
+    marginTop: 6,
   },
-  badgeProtocol: {
-    backgroundColor: '#e0f2fe',
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
   },
-  badgeText: {
-    fontSize: 11,
-    color: '#64748b',
+  deviceStatusText: {
+    fontSize: 12,
     fontWeight: '500',
   },
+  deviceMac: {
+    fontSize: 10,
+    color: '#555570',
+    marginTop: 4,
+  },
+  buttonCol: {
+    marginLeft: 12,
+  },
   connectBtn: {
-    backgroundColor: '#5DADE2',
+    backgroundColor: '#1B4965',
+    borderRadius: 8,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 8,
-    minWidth: 80,
-    alignItems: 'center',
-  },
-  connectBtnDisabled: {
-    backgroundColor: '#cbd5e1',
   },
   connectBtnText: {
     color: '#ffffff',
-    fontSize: 14,
     fontWeight: '600',
+    fontSize: 13,
   },
   disconnectBtn: {
-    backgroundColor: '#fef2f2',
-    borderWidth: 1,
-    borderColor: '#fecaca',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    backgroundColor: '#dc2626',
     borderRadius: 8,
-    minWidth: 90,
-    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
   disconnectBtnText: {
-    color: '#ef4444',
-    fontSize: 13,
+    color: '#ffffff',
     fontWeight: '600',
+    fontSize: 13,
   },
   emptyState: {
     flex: 1,
@@ -526,6 +569,19 @@ const styles = StyleSheet.create({
     color: '#64748b',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  doneButton: {
+    backgroundColor: '#2563eb',
+    marginHorizontal: 16,
+    marginTop: 8,
+    paddingVertical: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  doneButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
   },
   footer: {
     flexDirection: 'row',
